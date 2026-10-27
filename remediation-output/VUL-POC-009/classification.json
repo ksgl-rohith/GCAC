@@ -1,0 +1,11 @@
+{
+  "cwe": "CWE-22 Path Traversal",
+  "severity": "High",
+  "exploitability": "High due to the potential for unauthorized file access if input is not properly validated.",
+  "route": "SpecializedAction",
+  "strategy": "Implement input validation to ensure that the requested file path is within the allowed base directory.",
+  "attackVector": "An attacker can manipulate the file path input to access sensitive files on the server, requiring only knowledge of the file structure.",
+  "summary": "A high-severity path traversal vulnerability allows unauthorized access to files, necessitating immediate remediation.",
+  "vulnerabilityId": "VUL-POC-009",
+  "cveId": "CVE-2024-22251"
+}

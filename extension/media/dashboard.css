@@ -3034,3 +3034,278 @@ body.theme-dark .nav-item.active svg {
         padding: 0 8px;
     }
 }
+
+/* ==========================================================================
+   Milestone B — Integrated Scanning & Re-Scanning Verification Styles
+   ========================================================================== */
+
+.scans-container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: var(--spacing-lg) var(--spacing-xl);
+}
+
+.scans-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--spacing-lg);
+    gap: var(--spacing-md);
+    flex-wrap: wrap;
+}
+
+.scans-header h2 {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin: 0 0 4px 0;
+}
+
+.scans-header-actions {
+    display: flex;
+    gap: var(--spacing-sm);
+    align-items: center;
+}
+
+/* Scan Progress Card */
+.scan-progress-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--accent);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    margin-bottom: var(--spacing-lg);
+    box-shadow: 0 4px 12px rgba(37, 99, 235, 0.08);
+}
+
+.scan-progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: var(--spacing-sm);
+    font-size: 13px;
+    font-weight: 500;
+}
+
+.scan-progress-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    color: var(--text-primary);
+}
+
+.scan-progress-bar-track {
+    width: 100%;
+    height: 8px;
+    background: var(--bg-surface-subtle);
+    border-radius: var(--radius-pill);
+    overflow: hidden;
+}
+
+.scan-progress-bar-fill {
+    height: 100%;
+    background: var(--btn-primary-bg);
+    transition: width 0.3s ease;
+    border-radius: var(--radius-pill);
+}
+
+/* Scanners Cards Grid */
+.scanners-grid-section {
+    margin-bottom: var(--spacing-lg);
+}
+
+.section-heading {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    margin-bottom: var(--spacing-md);
+}
+
+.scanners-cards-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: var(--spacing-md);
+}
+
+.scanner-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.scanner-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
+}
+
+.scanner-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: var(--spacing-sm);
+}
+
+.scanner-card-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: var(--text-primary);
+}
+
+.scanner-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--radius-pill);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.scanner-badge.ready {
+    background: var(--success-subtle);
+    color: var(--success);
+    border: 1px solid var(--success-border);
+}
+
+.scanner-badge.running {
+    background: var(--info-subtle);
+    color: var(--info);
+    border: 1px solid var(--info-border);
+}
+
+.scanner-badge.not-installed,
+.scanner-badge.unavailable {
+    background: var(--bg-surface-subtle);
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+}
+
+.scanner-card-desc {
+    font-size: 12px;
+    color: var(--text-secondary);
+    line-height: 1.5;
+    margin-bottom: var(--spacing-sm);
+}
+
+.scanner-card-footer {
+    font-size: 11px;
+    color: var(--text-muted);
+    border-top: 1px solid var(--border-subtle);
+    padding-top: var(--spacing-xs);
+    display: flex;
+    justify-content: space-between;
+}
+
+/* Scan Scope Card */
+.scan-scope-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    padding: var(--spacing-md);
+    margin-bottom: var(--spacing-lg);
+}
+
+.scan-options-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+    gap: var(--spacing-sm);
+    margin-top: var(--spacing-sm);
+}
+
+.scan-checkbox-label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+/* Scan History Table */
+.scan-history-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-default);
+    border-radius: var(--radius-md);
+    overflow: hidden;
+}
+
+.scan-history-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+}
+
+.scan-history-table th {
+    background: var(--bg-surface-subtle);
+    text-align: left;
+    padding: 10px 14px;
+    color: var(--text-muted);
+    font-weight: 600;
+    border-bottom: 1px solid var(--border-default);
+}
+
+.scan-history-table td {
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border-subtle);
+    color: var(--text-primary);
+}
+
+.scan-history-table tr:hover {
+    background: var(--bg-surface-hover);
+}
+
+/* Source Badges */
+.badge-source {
+    display: inline-block;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: var(--radius-pill);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
+.badge-source.source-csv {
+    background: var(--info-subtle);
+    color: var(--info);
+    border: 1px solid var(--info-border);
+}
+
+.badge-source.source-scanner {
+    background: rgba(147, 51, 234, 0.1);
+    color: #9333ea;
+    border: 1px solid rgba(147, 51, 234, 0.25);
+}
+
+.verification-status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--radius-pill);
+}
+
+.verification-status-pill.resolved {
+    background: var(--success-subtle);
+    color: var(--success);
+    border: 1px solid var(--success-border);
+}
+
+.verification-status-pill.still-present {
+    background: var(--danger-subtle);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
+}
+
+.verification-status-pill.not-verified {
+    background: var(--bg-surface-subtle);
+    color: var(--text-muted);
+    border: 1px solid var(--border-subtle);
+}

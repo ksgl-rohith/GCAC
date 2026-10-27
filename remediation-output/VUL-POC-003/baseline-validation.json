@@ -1,0 +1,18 @@
+{
+  "executed": false,
+  "status": "NOT EXECUTED",
+  "reason": "Required runtime unavailable",
+  "executable": "dotnet",
+  "command": "dotnet test --nologo -v normal",
+  "workingDirectory": "/Users/ksglrohith/Documents/GitHub/GCAC/sample-repos/inventory-manager",
+  "startTime": "2026-10-25T16:13:10.560Z",
+  "endTime": "2026-10-25T16:13:10.578Z",
+  "durationMs": 0,
+  "exitCode": null,
+  "testsTotal": 0,
+  "testsPassed": 0,
+  "testsFailed": 0,
+  "stdout": "",
+  "stderr": "NOT EXECUTED — Required runtime unavailable: 'dotnet' not found in system PATH.",
+  "summary": "NOT EXECUTED — Required runtime unavailable: 'dotnet' not found in PATH."
+}

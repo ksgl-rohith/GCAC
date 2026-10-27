@@ -4,12 +4,40 @@ const path = require('path');
 const { loadVulnerabilities, updateVulnerabilityRow } = require('../extension/csvParser');
 const { loadVulnerabilityDetails, loadAllReports } = require('../extension/reportParser');
 const { RemediationEngine } = require('../extension/remediationEngine');
+const { ScanController } = require('../extension/scanning/scanController');
+const { FindingsStore } = require('../extension/scanning/findingsStore');
+const { DotnetSecurityScanner } = require('../extension/scanning/adapters/dotnetSecurityScanner');
+const { NugetAuditScanner } = require('../extension/scanning/adapters/nugetAuditScanner');
+const { SecretsConfigScanner } = require('../extension/scanning/adapters/secretsConfigScanner');
+const { CodeQLScanner } = require('../extension/scanning/adapters/codeqlScanner');
+const { ReScanVerifier } = require('../extension/scanning/reScanVerifier');
 
 let PORT = 3000;
 const workspaceRoot = path.resolve(__dirname, '..');
 const csvPath = path.join(workspaceRoot, 'vulnerability', 'vulnerabilities.csv');
 const mediaDir = path.join(workspaceRoot, 'extension', 'media');
-const engine = new RemediationEngine(workspaceRoot);
+
+const findingsStore = new FindingsStore(workspaceRoot);
+const scanController = new ScanController(workspaceRoot, findingsStore);
+scanController.registerScanner(new SecretsConfigScanner(workspaceRoot));
+scanController.registerScanner(new DotnetSecurityScanner(workspaceRoot));
+scanController.registerScanner(new NugetAuditScanner(workspaceRoot));
+scanController.registerScanner(new CodeQLScanner(workspaceRoot));
+
+const reScanVerifier = new ReScanVerifier(workspaceRoot, scanController);
+const engine = new RemediationEngine(workspaceRoot, findingsStore, reScanVerifier);
+
+/**
+ * Validates path within workspaceRoot to prevent traversal
+ */
+function assertPathWithinWorkspace(candidatePath, root = workspaceRoot) {
+    if (!candidatePath || typeof candidatePath !== 'string') return null;
+    const resolvedWs = path.resolve(root);
+    const resolved = path.isAbsolute(candidatePath) ? path.resolve(candidatePath) : path.resolve(resolvedWs, candidatePath);
+    const rel = path.relative(resolvedWs, resolved);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) return null;
+    return resolved;
+}
 
 /**
  * Helper to locate source files in workspace
@@ -73,7 +101,9 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/' || url.pathname === '/index.html') {
-        const html = fs.readFileSync(path.join(mediaDir, 'dashboard.html'), 'utf-8');
+        let html = fs.readFileSync(path.join(mediaDir, 'dashboard.html'), 'utf-8');
+        const previewCsp = "default-src 'none'; img-src 'self' data: https:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self';";
+        html = html.replace('{{CSP_POLICY}}', previewCsp);
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
         return;
@@ -241,6 +271,35 @@ const server = http.createServer(async (req, res) => {
                                 text: 'Copilot command prepared: @vulnerability-orchestrator /remediate-vulnerability ' + msg.vulnerabilityId,
                                 status: 'info'
                             }, '*');
+                        } else if (msg.command === 'getScanners') {
+                            fetch('/api/scanners')
+                                .then(r => r.json())
+                                .then(scanners => {
+                                    window.postMessage({ type: 'SCANNERS_LOADED', scanners: scanners }, '*');
+                                });
+                        } else if (msg.command === 'getScanHistory') {
+                            fetch('/api/scan-history')
+                                .then(r => r.json())
+                                .then(history => {
+                                    window.postMessage({ type: 'SCAN_HISTORY_LOADED', history: history }, '*');
+                                });
+                        } else if (msg.command === 'scanRepository') {
+                            fetch('/api/scan', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ scannerIds: msg.scannerIds, targetRepo: msg.targetRepo })
+                            }).then(r => r.json()).then(summary => {
+                                window.postMessage({
+                                    type: 'SCAN_COMPLETED',
+                                    scanId: summary.scanId,
+                                    findingsCount: summary.findingsCount,
+                                    summary: summary
+                                }, '*');
+                            }).catch(err => {
+                                window.postMessage({ type: 'SCAN_ERROR', error: err.message }, '*');
+                            });
+                        } else if (msg.command === 'cancelScan') {
+                            fetch('/api/scan/cancel', { method: 'POST' });
                         }
                     }
                 };
@@ -265,10 +324,55 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    if (url.pathname === '/api/vulnerabilities') {
-        const data = loadVulnerabilities(csvPath);
+    if (url.pathname === '/api/scanners') {
+        const scanners = scanController.getScannersInfo();
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(data));
+        res.end(JSON.stringify(scanners));
+        return;
+    }
+
+    if (url.pathname === '/api/scan-history') {
+        const history = scanController.getScanHistory();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(history));
+        return;
+    }
+
+    if (url.pathname === '/api/scan' && req.method === 'POST') {
+        let bodyStr = '';
+        req.on('data', chunk => { bodyStr += chunk; });
+        req.on('end', async () => {
+            try {
+                const body = JSON.parse(bodyStr || '{}');
+                const targetDir = body.targetRepo || workspaceRoot;
+                const summary = await scanController.startScan({
+                    scannerIds: body.scannerIds,
+                    targetDir: targetDir
+                });
+                res.writeHead(200, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify(summary));
+            } catch (err) {
+                res.writeHead(500, { 'Content-Type': 'application/json' });
+                res.end(JSON.stringify({ error: err.message }));
+            }
+        });
+        return;
+    }
+
+    if (url.pathname === '/api/scan/cancel' && req.method === 'POST') {
+        scanController.cancelScan();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ cancelled: true }));
+        return;
+    }
+
+    if (url.pathname === '/api/vulnerabilities') {
+        const csvData = loadVulnerabilities(csvPath);
+        const scanned = findingsStore.getFindings();
+        const adapted = scanned.map(f => f.toCsvCompatibleRecord ? f.toCsvCompatibleRecord() : f);
+        const combined = [...csvData, ...adapted];
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(combined));
         return;
     }
 
@@ -289,18 +393,19 @@ const server = http.createServer(async (req, res) => {
 
     if (url.pathname === '/api/report-content') {
         const targetPath = url.searchParams.get('path');
-        if (targetPath && fs.existsSync(targetPath)) {
-            const content = fs.readFileSync(targetPath, 'utf-8');
+        const safePath = targetPath ? assertPathWithinWorkspace(targetPath) : null;
+        if (safePath && fs.existsSync(safePath)) {
+            const content = fs.readFileSync(safePath, 'utf-8');
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({
                 success: true,
-                filePath: targetPath,
-                fileName: path.basename(targetPath),
+                filePath: safePath,
+                fileName: path.basename(safePath),
                 content: content
             }));
         } else {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify({ success: false, error: 'Report not found' }));
+            res.end(JSON.stringify({ success: false, error: 'Report not found or path outside workspace' }));
         }
         return;
     }

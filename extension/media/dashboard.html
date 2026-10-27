@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="{{CSP_POLICY}}">
     <title>GCAC Remediation Hub — Enterprise Security Workspace</title>
     <link rel="stylesheet" href="dashboard.css">
 </head>
@@ -46,6 +47,14 @@
                     </svg>
                     <span class="nav-label">Vulnerabilities</span>
                     <span class="nav-badge" id="navCountVulns">0</span>
+                </button>
+
+                <button class="nav-item" id="navItemScans" data-view="scans" title="Local Scanners">
+                    <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+                    </svg>
+                    <span class="nav-label">Local Scans</span>
+                    <span class="nav-badge badge-info" id="navCountScans" style="display: none;">0</span>
                 </button>
 
                 <button class="nav-item" id="navItemActiveRuns" data-view="active-runs" title="Active Runs">
@@ -117,6 +126,14 @@
                             <span class="live-pulse-dot"></span>
                             <span id="headerRunText">Stage 1 Active</span>
                         </div>
+
+                        <!-- Scan Repository Button -->
+                        <button class="btn btn-secondary btn-scan-repo" id="btnHeaderScan" title="Scan local repository for vulnerabilities">
+                            <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                                <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+                            </svg>
+                            <span class="btn-text">Scan Repository</span>
+                        </button>
 
                         <!-- Refresh Button -->
                         <button class="btn btn-secondary btn-icon-only" id="btnHeaderRefresh" title="Refresh local data and reload artifacts" aria-label="Refresh">
@@ -509,6 +526,12 @@
                                 <select class="select-filter" id="tableRepoFilter" aria-label="Filter by Repository">
                                     <option value="ALL">All Repositories</option>
                                 </select>
+
+                                <select class="select-filter" id="tableSourceFilter" aria-label="Filter by Source">
+                                    <option value="ALL">All Sources</option>
+                                    <option value="CSV">Imported CSV</option>
+                                    <option value="LocalScanner">Local Scanners</option>
+                                </select>
                             </div>
 
                             <!-- Table Element -->
@@ -519,6 +542,7 @@
                                             <th class="sortable" data-sort="id">ID &amp; CVE <span class="sort-indicator">↕</span></th>
                                             <th class="sortable" data-sort="title">Vulnerability <span class="sort-indicator">↕</span></th>
                                             <th class="sortable" data-sort="severity">Severity <span class="sort-indicator">↕</span></th>
+                                            <th class="sortable" data-sort="source">Source <span class="sort-indicator">↕</span></th>
                                             <th>Application / Repository</th>
                                             <th>Location</th>
                                             <th class="sortable" data-sort="status">Status <span class="sort-indicator">↕</span></th>
@@ -697,7 +721,10 @@
                                                 <span class="diff-stat-add" id="diffStatAdd">+0</span>
                                                 <span class="diff-stat-del" id="diffStatDel">-0</span>
                                             </div>
-                                            <button class="btn btn-secondary btn-sm" id="btnCopyDiff">Copy Diff</button>
+                                            <div class="diff-actions" style="display: flex; gap: 8px;">
+                                                <button class="btn btn-secondary btn-sm" id="btnOpenNativeDiff" title="Open Native VS Code Side-by-Side Diff Editor">Open in VS Code Diff</button>
+                                                <button class="btn btn-secondary btn-sm" id="btnCopyDiff">Copy Diff</button>
+                                            </div>
                                         </div>
                                         <div id="diffContent">
                                             <div class="empty-state">
@@ -864,6 +891,97 @@
                                         <p>Select a report from the list on the left to read full audit evidence.</p>
                                     </div>
                                 </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+
+                <!-- ===================================================================
+                     VIEW: LOCAL SCANNERS (Milestone B Integrated Scanning)
+                     =================================================================== -->
+                <section class="app-view" id="viewScans" data-view-id="scans">
+                    <div class="scans-container">
+                        <div class="scans-header">
+                            <div class="scans-header-left">
+                                <h2>Local Security Scanners &amp; Auditing</h2>
+                                <p class="view-subtitle">Autonomous static security analyzers, dependency auditing, and local configuration inspection</p>
+                            </div>
+                            <div class="scans-header-actions">
+                                <button class="btn btn-primary" id="btnStartScan">
+                                    <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                                        <path d="M12 1L3 5v6c0 5.55 3.84 10.74 9 12 5.16-1.26 9-6.45 9-12V5l-9-4zm0 10.99h7c-.53 4.12-3.28 7.79-7 8.94V12H5V6.3l7-3.11v8.8z"/>
+                                    </svg>
+                                    <span>Run Vulnerability Scan</span>
+                                </button>
+                                <button class="btn btn-secondary btn-danger" id="btnCancelScan" style="display: none;">Cancel Scan</button>
+                            </div>
+                        </div>
+
+                        <!-- Scan Progress Banner -->
+                        <div class="scan-progress-card" id="scanProgressCard" style="display: none;">
+                            <div class="scan-progress-header">
+                                <div class="scan-progress-title">
+                                    <span class="live-pulse-dot"></span>
+                                    <span id="scanProgressText">Scanning repository...</span>
+                                </div>
+                                <div class="scan-progress-timer" id="scanProgressTimer">0s</div>
+                            </div>
+                            <div class="scan-progress-bar-track">
+                                <div class="scan-progress-bar-fill" id="scanProgressBarFill" style="width: 0%;"></div>
+                            </div>
+                        </div>
+
+                        <!-- Registered Scanners Grid -->
+                        <div class="scanners-grid-section">
+                            <div class="section-heading">Approved Local Scanner Adapters</div>
+                            <div class="scanners-cards-grid" id="scannersCardsGrid">
+                                <!-- Dynamically populated via dashboard.js -->
+                            </div>
+                        </div>
+
+                        <!-- Scan Configuration & Scope -->
+                        <div class="scan-scope-card">
+                            <div class="card-heading">Scan Execution Scope &amp; Selectors</div>
+                            <div class="scan-options-row">
+                                <label class="scan-checkbox-label">
+                                    <input type="checkbox" id="chkScanSecrets" checked>
+                                    <span><strong>Local Secrets &amp; Configuration</strong> (CWE-798, CWE-327, CWE-78)</span>
+                                </label>
+                                <label class="scan-checkbox-label">
+                                    <input type="checkbox" id="chkScanDotnet" checked>
+                                    <span><strong>.NET Security Analysis</strong> (Roslyn CA5350, CA2100, CA3001)</span>
+                                </label>
+                                <label class="scan-checkbox-label">
+                                    <input type="checkbox" id="chkScanNuget" checked>
+                                    <span><strong>NuGet Dependency Audit</strong> (CWE-1395 Advisories)</span>
+                                </label>
+                                <label class="scan-checkbox-label">
+                                    <input type="checkbox" id="chkScanCodeql">
+                                    <span><strong>GitHub CodeQL CLI</strong> (Optional Local Engine)</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <!-- Recent Scan History -->
+                        <div class="scan-history-section">
+                            <div class="section-heading">Recent Scan Execution History</div>
+                            <div class="scan-history-card">
+                                <table class="scan-history-table" id="scanHistoryTable">
+                                    <thead>
+                                        <tr>
+                                            <th>Scan ID</th>
+                                            <th>Timestamp</th>
+                                            <th>Target</th>
+                                            <th>Duration</th>
+                                            <th>Status</th>
+                                            <th>Findings (Crit / High / Med)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="scanHistoryTableBody">
+                                        <tr><td colspan="6" class="empty-cell" style="text-align: center; padding: 24px; color: var(--text-muted);">No scan history recorded yet. Run a scan to discover local vulnerabilities.</td></tr>
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
                     </div>

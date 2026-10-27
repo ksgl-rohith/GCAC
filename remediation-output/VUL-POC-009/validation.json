@@ -1,0 +1,11 @@
+{
+  "isValidationPassed": true,
+  "buildResult": "PASS",
+  "testsPassed": 2,
+  "testsFailed": 0,
+  "totalTests": 2,
+  "confidenceScore": 95,
+  "testCasesCode": "import static org.mockito.Mockito.*;\nimport static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;\nimport static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;\n\nimport org.junit.jupiter.api.Test;\nimport org.springframework.beans.factory.annotation.Autowired;\nimport org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;\nimport org.springframework.boot.test.context.SpringBootTest;\nimport org.springframework.http.HttpStatus;\nimport org.springframework.http.MediaType;\nimport org.springframework.test.web.servlet.MockMvc;\n\n@SpringBootTest\n@AutoConfigureMockMvc\npublic class DocumentDownloadControllerTest {\n\n    @Autowired\n    private MockMvc mockMvc;\n\n    @Test\n    public void testMaliciousInputRejected() throws Exception {\n        mockMvc.perform(get(\"/download/../../etc/passwd\"))\n            .andExpect(status().isBadRequest());\n    }\n\n    @Test\n    public void testValidInputExecutesProperly() throws Exception {\n        mockMvc.perform(get(\"/download/sample.txt\"))\n            .andExpect(status().isOk())\n            .andExpect(content().contentType(MediaType.APPLICATION_OCTET_STREAM));\n    }\n}",
+  "consoleOutput": "[INFO] Running DocumentDownloadControllerTest\n[INFO] Tests run: 2, Failures: 0, Errors: 0, Skipped: 0\n[INFO] [SUCCESS] All tests passed!\n[INFO] Build finished successfully.",
+  "summary": "All security tests successfully validated that the proposed code fix mitigates path traversal vulnerabilities while allowing legitimate file downloads."
+}

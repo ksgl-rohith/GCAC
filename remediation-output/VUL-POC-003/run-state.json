@@ -1,0 +1,80 @@
+{
+  "vulnerabilityId": "VUL-POC-003",
+  "stage": 8,
+  "status": "COMPLETED",
+  "stage4Approved": true,
+  "stage6Approved": true,
+  "classification": {
+    "cwe": "CWE-1395 Vulnerable 3PP Dependency",
+    "severity": "High",
+    "exploitability": "High due to the widespread use of Newtonsoft.Json and potential for remote code execution.",
+    "route": "3PP",
+    "strategy": "Upgrade the Newtonsoft.Json package to version 13.0.3 to mitigate the vulnerability.",
+    "attackVector": "Exploitation can occur through deserialization of untrusted data using the vulnerable package.",
+    "summary": "The Newtonsoft.Json package is vulnerable, requiring an upgrade to ensure application security.",
+    "vulnerabilityId": "VUL-POC-003",
+    "cveId": "CVE-2024-30175"
+  },
+  "rca": {
+    "dataFlow": "The vulnerable Newtonsoft.Json package (version 12.0.3) is included as a dependency in the project. If this package is used to deserialize untrusted input, it may lead to security vulnerabilities such as remote code execution or denial of service, depending on how the deserialization is handled in the application.",
+    "rootCause": "The root cause is the inclusion of the outdated Newtonsoft.Json package (line 8) which is known to have vulnerabilities that can be exploited when processing untrusted data.",
+    "securityImpact": "The use of a vulnerable version of Newtonsoft.Json can compromise the confidentiality and integrity of the application, potentially allowing attackers to execute arbitrary code or manipulate application data.",
+    "proposedFix": "Update the Newtonsoft.Json package to a secure version (e.g., 13.0.1 or later) to mitigate known vulnerabilities.",
+    "affectedLines": "Lines 8",
+    "summary": "The project includes a vulnerable version of the Newtonsoft.Json package, which poses significant security risks when handling untrusted input."
+  },
+  "baselineValidation": {
+    "executed": false,
+    "status": "NOT EXECUTED",
+    "reason": "Required runtime unavailable",
+    "executable": "dotnet",
+    "command": "dotnet test --nologo -v normal",
+    "workingDirectory": "/Users/ksglrohith/Documents/GitHub/GCAC/sample-repos/inventory-manager",
+    "startTime": "2026-10-25T16:13:10.560Z",
+    "endTime": "2026-10-25T16:13:10.578Z",
+    "durationMs": 0,
+    "exitCode": null,
+    "testsTotal": 0,
+    "testsPassed": 0,
+    "testsFailed": 0,
+    "stdout": "",
+    "stderr": "NOT EXECUTED — Required runtime unavailable: 'dotnet' not found in system PATH.",
+    "summary": "NOT EXECUTED — Required runtime unavailable: 'dotnet' not found in PATH."
+  },
+  "patchDiff": "--- a/sample-repos/inventory-manager/src/InventoryManager/InventoryManager.csproj\n+++ b/sample-repos/inventory-manager/src/InventoryManager/InventoryManager.csproj\n@@ -8 +8 @@\n-    <PackageReference Include=\"Newtonsoft.Json\" Version=\"12.0.3\" />\n+    <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />",
+  "fullRemediatedCode": "<Project Sdk=\"Microsoft.NET.Sdk\">\n  <PropertyGroup>\n    <TargetFramework>net9.0</TargetFramework>\n    <ImplicitUsings>enable</ImplicitUsings>\n    <Nullable>enable</Nullable>\n  </PropertyGroup>\n  <ItemGroup>\n    <PackageReference Include=\"Newtonsoft.Json\" Version=\"13.0.3\" />\n    <PackageReference Include=\"System.Text.Encodings.Web\" Version=\"4.7.0\" />\n  </ItemGroup>\n</Project>",
+  "sourceFilePath": "/Users/ksglrohith/Documents/GitHub/GCAC/sample-repos/inventory-manager/src/InventoryManager/InventoryManager.csproj",
+  "targetRelPath": "sample-repos/inventory-manager/src/InventoryManager/InventoryManager.csproj",
+  "updatedAt": "2026-10-25 16:16:05 UTC",
+  "postFixValidation": {
+    "executed": false,
+    "status": "NOT EXECUTED",
+    "reason": "Required runtime unavailable",
+    "executable": "dotnet",
+    "command": "dotnet test --nologo -v normal",
+    "workingDirectory": "/Users/ksglrohith/Documents/GitHub/GCAC/sample-repos/inventory-manager",
+    "startTime": "2026-10-25T16:16:04.123Z",
+    "endTime": "2026-10-25T16:16:04.134Z",
+    "durationMs": 0,
+    "exitCode": null,
+    "testsTotal": 0,
+    "testsPassed": 0,
+    "testsFailed": 0,
+    "stdout": "",
+    "stderr": "NOT EXECUTED — Required runtime unavailable: 'dotnet' not found in system PATH.",
+    "summary": "NOT EXECUTED — Required runtime unavailable: 'dotnet' not found in PATH."
+  },
+  "regressionStatus": "NOT EXECUTED",
+  "securityReview": {
+    "rating": "PARTIAL",
+    "score": 50,
+    "summary": "The proposed remediation updates the Newtonsoft.Json package to a newer version, addressing the vulnerability. However, the genuine test was not executed due to the required runtime being unavailable, preventing verification of the fix.",
+    "auditChecks": [
+      "Test runner status was NOT EXECUTED.",
+      "No tests were run to verify the effectiveness of the remediation.",
+      "The vulnerability in the package was addressed by updating to a newer version."
+    ]
+  },
+  "finalRemediationStatus": "Remediated",
+  "reportPath": "/Users/ksglrohith/Documents/GitHub/GCAC/output/vulnerable_newtonsoft_json_package_vul_poc_003.md"
+}

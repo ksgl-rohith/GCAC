@@ -31,6 +31,18 @@
         "title": "GCAC: Refresh Vulnerability Records",
         "category": "GCAC",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "gcac.viewDiff",
+        "title": "GCAC: View Remediation Diff",
+        "category": "GCAC",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "gcac.scanRepository",
+        "title": "GCAC: Scan Repository for Vulnerabilities",
+        "category": "GCAC",
+        "icon": "$(search)"
       }
     ],
     "viewsContainers": {
@@ -74,7 +86,14 @@
       }
     ]
   },
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "GCAC Remediation Hub modifies files, runs local process validation, and accesses local repositories. A trusted workspace is required."
+    }
+  },
   "scripts": {
+    "test": "node tests/extension/run-all-tests.js",
     "start:preview": "node scripts/preview-dashboard.js"
   }
 }

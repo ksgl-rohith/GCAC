@@ -2,6 +2,37 @@ const fs = require('fs');
 const path = require('path');
 
 /**
+ * Normalizes a vulnerability ID or filename token for safe, deterministic matching.
+ * Handles hyphen-to-underscore conversions (e.g. VUL-POC-001 vs vul_poc_001)
+ * and guards against substring collisions (e.g. VUL-POC-001 vs VUL-POC-0010).
+ */
+function isReportMatchForVulnerability(fileName, vulnerabilityId) {
+    if (!fileName || !vulnerabilityId || !fileName.endsWith('.md')) return false;
+
+    // Direct match check
+    const cleanId = vulnerabilityId.trim();
+    const escapedPattern = cleanId.replace(/[-_]/g, '[-_]');
+    const boundaryRegex = new RegExp(`(?:^|[_-])${escapedPattern}(?:[_-]|\\.)`, 'i');
+    if (boundaryRegex.test(fileName)) {
+        return true;
+    }
+
+    // Normalized alphanumeric check as secondary guarantee
+    const normId = cleanId.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const normFile = fileName.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (normFile.endsWith(normId + 'md') || normFile.includes(normId)) {
+        // Ensure no trailing digit collision (e.g. vulpoc001 vs vulpoc0010)
+        const idx = normFile.indexOf(normId);
+        const nextChar = normFile.charAt(idx + normId.length);
+        if (!nextChar || nextChar === 'm' || isNaN(parseInt(nextChar, 10))) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+/**
  * Reads remediation artifacts and reports for a given vulnerability ID from all possible sources:
  * 1. remediation-output/<id>/
  * 2. evidence/<id>/
@@ -167,7 +198,7 @@ function loadVulnerabilityDetails(workspaceRoot, vulnerabilityId) {
     const sharedOutputDir = path.join(workspaceRoot, 'output');
     if (fs.existsSync(sharedOutputDir)) {
         const files = fs.readdirSync(sharedOutputDir);
-        const match = files.find(f => f.toLowerCase().includes(vulnerabilityId.toLowerCase()) && f.endsWith('.md'));
+        const match = files.find(f => isReportMatchForVulnerability(f, vulnerabilityId));
         if (match) {
             const sharedReportPath = path.join(sharedOutputDir, match);
             try {
@@ -393,14 +424,20 @@ function inferStageStatuses(details) {
 
     // Stage 5: Bench Test
     let benchPassed = false;
-    if (validation || report.includes('## Unit Test Agent') || report.includes('Post-Fix Verification Tests') || trace.includes('unit-test') || trace.includes('[TEST]') || trace.includes('[BENCH_TEST]')) {
-        const testsPassed = validation?.testsPassed ?? (validation?.testExecution?.passedCount ?? 1);
-        const testsFailed = validation?.testsFailed ?? (validation?.testExecution?.failedCount ?? 0);
-        const exitZero = validation?.exitCode === 0 || validation?.buildResult === 'PASS' || validation?.isValidationPassed === true;
-        benchPassed = exitZero && testsFailed === 0;
+    if (validation || report.includes('## Unit Test Agent') || report.includes('Post-Fix Verification Tests') || report.includes('## Post-Fix Test Validation') || trace.includes('unit-test') || trace.includes('[TEST]') || trace.includes('[BENCH_TEST]')) {
+        if (validation?.status === 'NOT EXECUTED') {
+            stages[4].status = 'pending';
+            stages[4].summary = validation.summary || 'NOT EXECUTED — Required runtime unavailable.';
+            benchPassed = false;
+        } else {
+            const testsPassed = validation?.testsPassed ?? (validation?.testExecution?.passedCount ?? 0);
+            const testsFailed = validation?.testsFailed ?? (validation?.testExecution?.failedCount ?? 0);
+            const exitZero = validation?.exitCode === 0 || validation?.buildResult === 'PASS' || validation?.status === 'PASS';
+            benchPassed = exitZero && testsFailed === 0;
 
-        stages[4].status = benchPassed ? 'completed' : 'failed';
-        stages[4].summary = `Targeted unit tests ${benchPassed ? 'passed' : 'failed'} (${testsPassed} passed, ${testsFailed} failed).`;
+            stages[4].status = benchPassed ? 'completed' : 'failed';
+            stages[4].summary = `Targeted unit tests ${benchPassed ? 'passed' : 'failed'} (${testsPassed} passed, ${testsFailed} failed).`;
+        }
     }
 
     // Stage 6: Final Human Approval Gate
@@ -467,16 +504,26 @@ function extractTimingsFromTrace(traceLog) {
     const finalGateEvt = findEvent('FINAL_GATE');
     const handoffEvt = findEvent('HANDOFF') || events[events.length - 1];
 
-    const analysisDurationSec = (rcaEvt && classifyEvt) ? Math.max(0.3, (rcaEvt.timestamp - classifyEvt.timestamp) / 1000) : (rcaEvt ? 0.8 : null);
-    const remediationDurationSec = (remediateEvt && rcaEvt) ? Math.max(0.5, (remediateEvt.timestamp - rcaEvt.timestamp) / 1000) : (remediateEvt ? 0.95 : null);
-    const approvalWaitDurationSec = (govGateEvt && remediateEvt) ? Math.max(0.2, (govGateEvt.timestamp - remediateEvt.timestamp) / 1000) : null;
-    const testDurationSec = (benchTestEvt && govGateEvt) ? Math.max(0.5, (benchTestEvt.timestamp - govGateEvt.timestamp) / 1000) : (benchTestEvt ? 1.42 : null);
-    const validationDurationSec = (finalGateEvt && benchTestEvt) ? Math.max(0.3, (finalGateEvt.timestamp - benchTestEvt.timestamp) / 1000) : null;
+    const analysisDurationSec = (rcaEvt && classifyEvt && rcaEvt.timestamp >= classifyEvt.timestamp)
+        ? Math.max(0, (rcaEvt.timestamp.getTime() - classifyEvt.timestamp.getTime()) / 1000)
+        : null;
+    const remediationDurationSec = (remediateEvt && rcaEvt && remediateEvt.timestamp >= rcaEvt.timestamp)
+        ? Math.max(0, (remediateEvt.timestamp.getTime() - rcaEvt.timestamp.getTime()) / 1000)
+        : null;
+    const approvalWaitDurationSec = (govGateEvt && remediateEvt && govGateEvt.timestamp >= remediateEvt.timestamp)
+        ? Math.max(0, (govGateEvt.timestamp.getTime() - remediateEvt.timestamp.getTime()) / 1000)
+        : null;
+    const testDurationSec = (benchTestEvt && govGateEvt && benchTestEvt.timestamp >= govGateEvt.timestamp)
+        ? Math.max(0, (benchTestEvt.timestamp.getTime() - govGateEvt.timestamp.getTime()) / 1000)
+        : null;
+    const validationDurationSec = (finalGateEvt && benchTestEvt && finalGateEvt.timestamp >= benchTestEvt.timestamp)
+        ? Math.max(0, (finalGateEvt.timestamp.getTime() - benchTestEvt.timestamp.getTime()) / 1000)
+        : null;
 
     return {
         runStartTime: startTime.toISOString(),
         runEndTime: endTime.toISOString(),
-        totalDurationSec: totalDurationSec || 3.0,
+        totalDurationSec: totalDurationSec > 0 ? totalDurationSec : null,
         analysisDurationSec,
         remediationDurationSec,
         approvalWaitDurationSec,
@@ -561,5 +608,6 @@ function loadAllReports(workspaceRoot) {
 module.exports = {
     loadVulnerabilityDetails,
     extractTimingsFromTrace,
-    loadAllReports
+    loadAllReports,
+    isReportMatchForVulnerability
 };

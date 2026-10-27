@@ -1,0 +1,5 @@
+--- a/sample-repos/inventory-manager/src/InventoryManager/InventoryManager.csproj
++++ b/sample-repos/inventory-manager/src/InventoryManager/InventoryManager.csproj
+@@ -8 +8 @@
+-    <PackageReference Include="Newtonsoft.Json" Version="12.0.3" />
++    <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />

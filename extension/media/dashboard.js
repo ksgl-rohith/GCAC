@@ -58,6 +58,10 @@
             title: 'Audit Reports & Evidence Store',
             sub: 'Shared Markdown reports, patch artifacts, and independent validation outputs.'
         },
+        'scans': {
+            title: 'Local Security Scanners',
+            sub: 'Run authorized local static analyzers, secret detectors, and dependency audit checks.'
+        },
         'settings': {
             title: 'Workspace Settings',
             sub: 'Local repository bounding, theme configuration, and security policy verification.'
@@ -199,6 +203,7 @@
     const diffStatAdd = document.getElementById('diffStatAdd');
     const diffStatDel = document.getElementById('diffStatDel');
     const btnCopyDiff = document.getElementById('btnCopyDiff');
+    const btnOpenNativeDiff = document.getElementById('btnOpenNativeDiff');
     const valContent = document.getElementById('valContent');
     const traceContent = document.getElementById('traceContent');
     const btnCopyTrace = document.getElementById('btnCopyTrace');
@@ -227,6 +232,24 @@
     const reportViewerTitle = document.getElementById('reportViewerTitle');
     const reportViewerBody = document.getElementById('reportViewerBody');
     const btnCopyReportMarkdown = document.getElementById('btnCopyReportMarkdown');
+
+    // DOM Elements - Scans View & Controls
+    const btnHeaderScan = document.getElementById('btnHeaderScan');
+    const tableSourceFilter = document.getElementById('tableSourceFilter');
+    const btnStartScan = document.getElementById('btnStartScan');
+    const btnCancelScan = document.getElementById('btnCancelScan');
+    const scanProgressCard = document.getElementById('scanProgressCard');
+    const scanProgressText = document.getElementById('scanProgressText');
+    const scanProgressTimer = document.getElementById('scanProgressTimer');
+    const scanProgressBarFill = document.getElementById('scanProgressBarFill');
+    const scannersCardsGrid = document.getElementById('scannersCardsGrid');
+    const chkScanSecrets = document.getElementById('chkScanSecrets');
+    const chkScanDotnet = document.getElementById('chkScanDotnet');
+    const chkScanNuget = document.getElementById('chkScanNuget');
+    const chkScanCodeql = document.getElementById('chkScanCodeql');
+    const scanHistoryTableBody = document.getElementById('scanHistoryTableBody');
+    let scanTimerInterval = null;
+    let scanStartTime = 0;
 
     // DOM Elements - Settings View
     const settingsRepoVal = document.getElementById('settingsRepoVal');
@@ -362,6 +385,9 @@
             renderReviewQueueView();
         } else if (viewId === 'reports') {
             postToHost({ command: 'loadReports' });
+        } else if (viewId === 'scans') {
+            postToHost({ command: 'getScanners' });
+            postToHost({ command: 'getScanHistory' });
         }
     }
 
@@ -455,6 +481,27 @@
             });
         }
 
+        // Header Scan CTA
+        if (btnHeaderScan) {
+            btnHeaderScan.addEventListener('click', () => {
+                switchView('scans');
+            });
+        }
+
+        // Scans View Execution Controls
+        if (btnStartScan) {
+            btnStartScan.addEventListener('click', () => {
+                triggerScanExecution();
+            });
+        }
+
+        if (btnCancelScan) {
+            btnCancelScan.addEventListener('click', () => {
+                postToHost({ command: 'cancelScan' });
+                showToast('Cancelling vulnerability scan...', 'warning');
+            });
+        }
+
         // Global Search
         if (globalSearchInput) {
             globalSearchInput.addEventListener('input', () => {
@@ -531,6 +578,7 @@
         if (tableSeverityFilter) tableSeverityFilter.addEventListener('change', renderTable);
         if (tableStatusFilter) tableStatusFilter.addEventListener('change', renderTable);
         if (tableRepoFilter) tableRepoFilter.addEventListener('change', renderTable);
+        if (tableSourceFilter) tableSourceFilter.addEventListener('change', renderTable);
 
         // Table Sortable Headers
         tableSortHeaders.forEach(th => {
@@ -666,6 +714,19 @@
                     navigator.clipboard.writeText(currentDetails.patchDiff).then(() => {
                         showToast('Patch diff copied to clipboard', 'success');
                     });
+                }
+            });
+        }
+
+        if (btnOpenNativeDiff) {
+            btnOpenNativeDiff.addEventListener('click', () => {
+                if (selectedVulnerability) {
+                    postToHost({
+                        command: 'viewDiff',
+                        vulnerabilityId: selectedVulnerability.Vulnerability_ID
+                    });
+                } else {
+                    showToast('Please select a vulnerability first', 'warning');
                 }
             });
         }
@@ -832,7 +893,7 @@
                     break;
 
                 case 'COPILOT_LAUNCHED':
-                    openCopilotModal(message.prompt);
+                    openCopilotModal(message.prompt, message.manualSubmissionRequired !== false);
                     break;
 
                 case 'ACTION_FEEDBACK':
@@ -845,6 +906,26 @@
                     if (navActiveRunPulse) navActiveRunPulse.style.display = 'none';
                     if (btnRunRemediationText) btnRunRemediationText.textContent = 'Execute Engine';
                     showToast(message.error || 'Remediation pipeline error', 'error');
+                    break;
+
+                case 'SCANNERS_LOADED':
+                    renderScannersCards(message.scanners);
+                    break;
+
+                case 'SCAN_HISTORY_LOADED':
+                    renderScanHistory(message.history);
+                    break;
+
+                case 'SCAN_PROGRESS':
+                    handleScanProgress(message);
+                    break;
+
+                case 'SCAN_COMPLETED':
+                    handleScanCompleted(message);
+                    break;
+
+                case 'SCAN_ERROR':
+                    handleScanError(message);
                     break;
             }
         });
@@ -1045,14 +1126,13 @@
 
         // Count metrics accurately from local data
         const critical = data.filter(v => (v.Severity || '').toUpperCase() === 'CRITICAL').length;
-        const remediated = data.filter(v => {
-            const st = (v.Remediation_Status || '').toLowerCase();
-            const val = (v.Final_Validation_Status || '').toUpperCase();
-            return st === 'remediated' || val === 'PASS';
-        }).length;
+        const remediated = data.filter(v => (v.Remediation_Status || '').toLowerCase() === 'remediated').length;
         const review = data.filter(v => (v.Requires_Human_Review || '').toLowerCase() === 'true' || (v.Remediation_Status || '').toLowerCase().includes('review')).length;
         const inProgress = data.filter(v => (v.Remediation_Status || '').toLowerCase().includes('progress')).length;
-        const failed = data.filter(v => (v.Remediation_Status || '').toLowerCase().includes('fail') || (v.Final_Validation_Status || '').toUpperCase() === 'FAIL').length;
+        const failed = data.filter(v => {
+            const st = (v.Remediation_Status || '').toLowerCase();
+            return st.includes('fail') || st === 'rejected';
+        }).length;
 
         // KPI values
         if (dashKpiTotal) dashKpiTotal.textContent = total;
@@ -1061,7 +1141,7 @@
         if (dashKpiRemediated) dashKpiRemediated.textContent = remediated;
         if (dashKpiReview) dashKpiReview.textContent = review;
 
-        // Success rate
+        // Success rate: computed strictly on completed attempts
         const completedRuns = remediated + failed;
         if (completedRuns > 0) {
             const rate = Math.round((remediated / completedRuns) * 100);
@@ -1076,44 +1156,89 @@
         let remediationDurationSum = 0;
         let testDurationSum = 0;
         let approvalWaitSum = 0;
-        let runsWithTimings = 0;
+
+        let totalDurationCount = 0;
+        let analysisDurationCount = 0;
+        let remediationDurationCount = 0;
+        let testDurationCount = 0;
+        let approvalWaitCount = 0;
 
         detailsCache.forEach(det => {
             if (det.timings) {
-                runsWithTimings++;
-                totalDurationSum += (det.timings.totalDurationSec || 0);
-                if (det.timings.analysisDurationSec) analysisDurationSum += det.timings.analysisDurationSec;
-                if (det.timings.remediationDurationSec) remediationDurationSum += det.timings.remediationDurationSec;
-                if (det.timings.testDurationSec) testDurationSum += det.timings.testDurationSec;
-                if (det.timings.approvalWaitDurationSec) approvalWaitSum += det.timings.approvalWaitDurationSec;
+                if (det.timings.totalDurationSec !== null && det.timings.totalDurationSec !== undefined) {
+                    totalDurationSum += det.timings.totalDurationSec;
+                    totalDurationCount++;
+                }
+                if (det.timings.analysisDurationSec !== null && det.timings.analysisDurationSec !== undefined) {
+                    analysisDurationSum += det.timings.analysisDurationSec;
+                    analysisDurationCount++;
+                }
+                if (det.timings.remediationDurationSec !== null && det.timings.remediationDurationSec !== undefined) {
+                    remediationDurationSum += det.timings.remediationDurationSec;
+                    remediationDurationCount++;
+                }
+                if (det.timings.testDurationSec !== null && det.timings.testDurationSec !== undefined) {
+                    testDurationSum += det.timings.testDurationSec;
+                    testDurationCount++;
+                }
+                if (det.timings.approvalWaitDurationSec !== null && det.timings.approvalWaitDurationSec !== undefined) {
+                    approvalWaitSum += det.timings.approvalWaitDurationSec;
+                    approvalWaitCount++;
+                }
             }
         });
 
-        if (runsWithTimings > 0) {
-            const avgTotal = (totalDurationSum / runsWithTimings).toFixed(1);
-            const avgAnalysis = (analysisDurationSum / runsWithTimings).toFixed(1);
-            const avgRemediation = (remediationDurationSum / runsWithTimings).toFixed(1);
-            const avgTest = (testDurationSum / runsWithTimings).toFixed(1);
-            const avgApproval = (approvalWaitSum / runsWithTimings).toFixed(1);
-
-            if (dashKpiAvgDuration) dashKpiAvgDuration.textContent = `${avgTotal}s`;
-            if (timeMetricAnalysis) timeMetricAnalysis.textContent = `${avgAnalysis}s`;
-            if (timeMetricRemediation) timeMetricRemediation.textContent = `${avgRemediation}s`;
-            if (timeMetricTest) timeMetricTest.textContent = `${avgTest}s`;
-            if (timeMetricApproval) timeMetricApproval.textContent = `${avgApproval}s`;
-        } else {
-            if (dashKpiAvgDuration) dashKpiAvgDuration.textContent = 'N/A';
-            if (timeMetricAnalysis) timeMetricAnalysis.textContent = 'N/A';
-            if (timeMetricRemediation) timeMetricRemediation.textContent = 'N/A';
-            if (timeMetricTest) timeMetricTest.textContent = 'N/A';
-            if (timeMetricApproval) timeMetricApproval.textContent = 'N/A';
-        }
+        if (dashKpiAvgDuration) dashKpiAvgDuration.textContent = totalDurationCount > 0 ? `${(totalDurationSum / totalDurationCount).toFixed(1)}s` : 'N/A';
+        if (timeMetricAnalysis) timeMetricAnalysis.textContent = analysisDurationCount > 0 ? `${(analysisDurationSum / analysisDurationCount).toFixed(1)}s` : 'N/A';
+        if (timeMetricRemediation) timeMetricRemediation.textContent = remediationDurationCount > 0 ? `${(remediationDurationSum / remediationDurationCount).toFixed(1)}s` : 'N/A';
+        if (timeMetricTest) timeMetricTest.textContent = testDurationCount > 0 ? `${(testDurationSum / testDurationCount).toFixed(1)}s` : 'N/A';
+        if (timeMetricApproval) timeMetricApproval.textContent = approvalWaitCount > 0 ? `${(approvalWaitSum / approvalWaitCount).toFixed(1)}s` : 'N/A';
 
         // Quality Metrics
         if (qualityMetricFirstPass) qualityMetricFirstPass.textContent = completedRuns > 0 ? `${Math.round((remediated / completedRuns) * 100)}%` : 'N/A';
-        if (qualityMetricTestPass) qualityMetricTestPass.textContent = completedRuns > 0 ? '100%' : 'N/A';
-        if (qualityMetricValidation) qualityMetricValidation.textContent = remediated > 0 ? `${remediated} PASS / 0 FAIL` : 'Pending';
-        if (qualityMetricRetries) qualityMetricRetries.textContent = '0';
+
+        // Calculate genuine test pass rate from detailsCache
+        let genuineTestsPassed = 0;
+        let genuineTestsTotal = 0;
+        let hasGenuineTestData = false;
+        let validationPassCount = 0;
+        let validationPartialCount = 0;
+        let validationFailCount = 0;
+
+        detailsCache.forEach(det => {
+            if (det.validation && det.validation.executed) {
+                hasGenuineTestData = true;
+                genuineTestsPassed += (det.validation.testsPassed || 0);
+                genuineTestsTotal += (det.validation.testsTotal || 0);
+            }
+            if (det.securityReview && det.securityReview.rating) {
+                const r = det.securityReview.rating.toUpperCase();
+                if (r === 'PASS') validationPassCount++;
+                else if (r === 'PARTIAL') validationPartialCount++;
+                else if (r === 'FAIL') validationFailCount++;
+            }
+        });
+
+        if (qualityMetricTestPass) {
+            if (hasGenuineTestData && genuineTestsTotal > 0) {
+                qualityMetricTestPass.textContent = `${Math.round((genuineTestsPassed / genuineTestsTotal) * 100)}%`;
+            } else {
+                qualityMetricTestPass.textContent = 'N/A';
+            }
+        }
+
+        if (qualityMetricValidation) {
+            const totalValidated = validationPassCount + validationPartialCount + validationFailCount;
+            if (totalValidated > 0) {
+                qualityMetricValidation.textContent = `${validationPassCount} PASS / ${validationPartialCount} PARTIAL / ${validationFailCount} FAIL`;
+            } else {
+                qualityMetricValidation.textContent = remediated > 0 ? `${remediated} PASS` : 'Pending';
+            }
+        }
+
+        if (qualityMetricRetries) {
+            qualityMetricRetries.textContent = 'N/A';
+        }
 
         // Update nav counters
         if (navCountVulns) navCountVulns.textContent = total;
@@ -1404,19 +1529,29 @@
         let cDur = 0, aDur = 0, rDur = 0, hDur = 0, tDur = 0, fDur = 0, mDur = 0;
 
         detailsCache.forEach(det => {
-            if (det.timings) {
+            if (det.timings && det.timings.totalDurationSec) {
                 totalRuns++;
-                cDur += (det.timings.classificationDurationSec || 0.4);
-                aDur += (det.timings.analysisDurationSec || 0.5);
-                rDur += (det.timings.remediationDurationSec || 0.8);
-                hDur += (det.timings.approvalWaitDurationSec || 0.3);
-                tDur += (det.timings.testDurationSec || 0.6);
-                fDur += (det.timings.finalGateDurationSec || 0.3);
-                mDur += (det.timings.documentationDurationSec || 0.4);
+                if (det.timings.classificationDurationSec) cDur += det.timings.classificationDurationSec;
+                if (det.timings.analysisDurationSec) aDur += det.timings.analysisDurationSec;
+                if (det.timings.remediationDurationSec) rDur += det.timings.remediationDurationSec;
+                if (det.timings.approvalWaitDurationSec) hDur += det.timings.approvalWaitDurationSec;
+                if (det.timings.testDurationSec) tDur += det.timings.testDurationSec;
+                if (det.timings.validationDurationSec) fDur += det.timings.validationDurationSec;
+                if (det.timings.documentationDurationSec) mDur += det.timings.documentationDurationSec;
             }
         });
 
-        const factor = totalRuns > 0 ? totalRuns : 1;
+        if (totalRuns === 0) {
+            chartStageDurationContainer.innerHTML = `
+                <div class="empty-state" style="padding: 24px; text-align: center; width: 100%;">
+                    <p style="font-weight: 500; color: var(--text-muted);">No stage duration telemetry available yet.</p>
+                    <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Durations are captured strictly during live execution.</p>
+                </div>
+            `;
+            return;
+        }
+
+        const factor = totalRuns;
         const stages = [
             { label: '1. Classification', duration: parseFloat((cDur / factor).toFixed(2)), color: 'var(--accent)' },
             { label: '2. Code Analysis', duration: parseFloat((aDur / factor).toFixed(2)), color: 'var(--info)' },
@@ -1501,10 +1636,17 @@
         const sev = tableSeverityFilter?.value || 'ALL';
         const st = tableStatusFilter?.value || 'ALL';
         const rep = tableRepoFilter?.value || 'ALL';
+        const src = tableSourceFilter?.value || 'ALL';
 
         return allVulnerabilities.filter(v => {
             if (sev !== 'ALL' && (v.Severity || '').toUpperCase() !== sev) return false;
             if (rep !== 'ALL' && v.Repository !== rep) return false;
+
+            if (src !== 'ALL') {
+                const isScanner = (v.Source_Type === 'SCANNER' || v.Source_Type === 'scanner');
+                if (src === 'LocalScanner' && !isScanner) return false;
+                if (src === 'CSV' && isScanner) return false;
+            }
 
             if (st !== 'ALL') {
                 const status = (v.Remediation_Status || 'Pending').toUpperCase();
@@ -1548,6 +1690,9 @@
             } else if (tableSortColumn === 'status') {
                 valA = a.Remediation_Status || '';
                 valB = b.Remediation_Status || '';
+            } else if (tableSortColumn === 'source') {
+                valA = a.Source_Type || 'CSV';
+                valB = b.Source_Type || 'CSV';
             }
 
             if (valA < valB) return tableSortAsc ? -1 : 1;
@@ -1560,7 +1705,7 @@
         if (list.length === 0) {
             vulnTableBody.innerHTML = `
                 <tr>
-                    <td colspan="8" class="empty-state">
+                    <td colspan="9" class="empty-state">
                         <p style="font-weight: 600;">No vulnerabilities match your filter criteria.</p>
                         <p style="font-size: 11px; color: var(--text-muted); margin-top: 4px;">Try clearing filters or search query.</p>
                     </td>
@@ -1578,6 +1723,9 @@
 
             const sevClass = getSeverityBadgeClass(v.Severity);
             const statusClass = getStatusBadgeClass(v.Remediation_Status, v.Requires_Human_Review);
+            const isScanner = (v.Source_Type === 'SCANNER' || v.Source_Type === 'scanner');
+            const sourceBadgeClass = isScanner ? 'badge-source-scanner' : 'badge-source-csv';
+            const sourceLabel = isScanner ? (v.Scanner_ID ? `Scanner: ${v.Scanner_ID}` : 'Local Scanner') : 'CSV Import';
 
             tr.innerHTML = `
                 <td>
@@ -1590,6 +1738,9 @@
                 </td>
                 <td>
                     <span class="badge ${sevClass}">${escapeHtml(v.Severity || 'Unknown')}</span>
+                </td>
+                <td>
+                    <span class="badge ${sourceBadgeClass}">${escapeHtml(sourceLabel)}</span>
                 </td>
                 <td>
                     <div style="font-weight: 500;">${escapeHtml(v.Application_Name || '')}</div>
@@ -1641,12 +1792,21 @@
             detailSeverity.textContent = v.Severity;
             detailSeverity.className = `badge ${getSeverityBadgeClass(v.Severity)}`;
         }
+        const isScannerFinding = (v.Source_Type === 'SCANNER' || v.Source_Type === 'scanner');
         if (detailApp) detailApp.textContent = `${v.Application_Name || ''} (${v.Application_Number || ''})`;
         if (detailRepo) detailRepo.textContent = v.Repository || 'workspace';
-        if (detailTech) detailTech.textContent = v.Technology || 'dotnet';
+        if (detailTech) detailTech.textContent = isScannerFinding && v.Scanner_ID ? `${v.Technology || 'dotnet'} (${v.Scanner_ID})` : (v.Technology || 'dotnet');
         if (detailSla) detailSla.textContent = v.SLA_Status || 'In SLA';
         if (detailLocation) detailLocation.textContent = `${v.Location_Path || ''} ${v.Line_Number ? `(Line ${v.Line_Number})` : ''}`;
-        if (detailGuidance) detailGuidance.textContent = v.Remediation_Guidance || 'Apply secure coding best practices.';
+        if (detailGuidance) {
+            if (v.Remediation_Guidance) {
+                detailGuidance.textContent = v.Remediation_Guidance;
+            } else if (v.Rule_ID) {
+                detailGuidance.textContent = `Security Rule ${v.Rule_ID}: Review identified location and implement defensive verification.`;
+            } else {
+                detailGuidance.textContent = 'Apply secure coding best practices.';
+            }
+        }
 
         // Update Live Remediation button state
         const isRemediated = (v.Remediation_Status || '').toLowerCase() === 'remediated';
@@ -1812,26 +1972,29 @@
             return;
         }
 
-        const buildPass = val?.buildResult === 'PASS' || val?.isValidationPassed === true;
-        const testsPassed = val?.testsPassed ?? (val?.testExecution?.passedCount ?? (buildPass ? 1 : 0));
-        const testsFailed = val?.testsFailed ?? (val?.testExecution?.failedCount ?? 0);
-        const duration = val?.durationMs ? `${(val.durationMs / 1000).toFixed(2)}s` : '1.42s';
-        const score = val?.confidenceScore || (sec?.rating === 'PASS' ? (sec?.score || 96) : 85);
+        const isNotExecuted = val?.status === 'NOT EXECUTED' || val?.executed === false;
+        const testStatus = isNotExecuted ? 'NOT EXECUTED' : (val?.status || (val?.buildResult === 'PASS' ? 'PASS' : 'FAIL'));
+        const buildPass = testStatus === 'PASS';
+        const testsPassed = val?.testsPassed ?? 0;
+        const testsFailed = val?.testsFailed ?? 0;
+        const duration = val?.durationMs ? `${(val.durationMs / 1000).toFixed(2)}s` : 'N/A';
+        const score = sec?.score ?? (val?.confidenceScore ?? (buildPass ? 90 : (isNotExecuted ? 70 : 40)));
+        const statusColor = buildPass ? 'var(--success)' : (isNotExecuted ? 'var(--warning)' : 'var(--danger)');
 
         valContent.innerHTML = `
             <div class="evidence-dashboard">
                 <div class="test-metric-row">
                     <div class="test-metric-card">
-                        <div class="test-metric-label">Build Result</div>
-                        <div class="test-metric-val" style="color: ${buildPass ? 'var(--success)' : 'var(--danger)'};">${buildPass ? 'PASS' : 'FAIL'}</div>
+                        <div class="test-metric-label">Execution Status</div>
+                        <div class="test-metric-val" style="color: ${statusColor}; font-size: 13px;">${escapeHtml(testStatus)}</div>
                     </div>
                     <div class="test-metric-card">
                         <div class="test-metric-label">Tests Passed</div>
-                        <div class="test-metric-val" style="color: var(--success);">${testsPassed}</div>
+                        <div class="test-metric-val" style="color: var(--success);">${isNotExecuted ? 'N/A' : testsPassed}</div>
                     </div>
                     <div class="test-metric-card">
                         <div class="test-metric-label">Tests Failed</div>
-                        <div class="test-metric-val" style="color: ${testsFailed > 0 ? 'var(--danger)' : 'var(--text-muted)'};">${testsFailed}</div>
+                        <div class="test-metric-val" style="color: ${testsFailed > 0 ? 'var(--danger)' : 'var(--text-muted)'};">${isNotExecuted ? 'N/A' : testsFailed}</div>
                     </div>
                     <div class="test-metric-card">
                         <div class="test-metric-label">Duration</div>
@@ -1842,17 +2005,17 @@
                 <div class="score-meter-wrap">
                     <div class="score-meter-label">
                         <span style="font-weight: 600;">Autonomous Validation Confidence Score</span>
-                        <span style="font-weight: 700; color: ${score >= 90 ? 'var(--success)' : 'var(--warning)'};">${score} / 100</span>
+                        <span style="font-weight: 700; color: ${score >= 90 ? 'var(--success)' : (score >= 70 ? 'var(--warning)' : 'var(--danger)')};">${score} / 100</span>
                     </div>
                     <div class="score-bar-bg">
-                        <div class="score-bar-fill" style="width: ${score}%; background: ${score >= 90 ? 'var(--success)' : 'var(--warning)'};"></div>
+                        <div class="score-bar-fill" style="width: ${score}%; background: ${score >= 90 ? 'var(--success)' : (score >= 70 ? 'var(--warning)' : 'var(--danger)')};"></div>
                     </div>
                 </div>
 
                 ${val?.consoleOutput ? `
-                    <div style="margin-top: 4px;">
+                    <div style="margin-top: 8px;">
                         <div style="font-size: 11px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 4px;">Runner Console Output</div>
-                        <pre style="max-height: 140px;">${escapeHtml(val.consoleOutput)}</pre>
+                        <pre style="max-height: 140px; white-space: pre-wrap; font-family: var(--font-mono); font-size: 11px;">${escapeHtml(val.consoleOutput)}</pre>
                     </div>
                 ` : ''}
             </div>
@@ -1973,6 +2136,150 @@
     }
 
     // --------------------------------------------------------------------------
+    // Vulnerability Scanning & Adapter Management
+    // --------------------------------------------------------------------------
+    function triggerScanExecution() {
+        const scannerIds = [];
+        if (chkScanSecrets && chkScanSecrets.checked) scannerIds.push('secrets-config-scanner');
+        if (chkScanDotnet && chkScanDotnet.checked) scannerIds.push('dotnet-security-scanner');
+        if (chkScanNuget && chkScanNuget.checked) scannerIds.push('nuget-audit-scanner');
+        if (chkScanCodeql && chkScanCodeql.checked) scannerIds.push('codeql-scanner');
+
+        if (scannerIds.length === 0) {
+            showToast('Please select at least one scanner adapter', 'warning');
+            return;
+        }
+
+        if (btnStartScan) btnStartScan.disabled = true;
+        if (btnCancelScan) btnCancelScan.style.display = 'inline-flex';
+        if (scanProgressCard) scanProgressCard.style.display = 'block';
+        if (scanProgressBarFill) scanProgressBarFill.style.width = '5%';
+        if (scanProgressText) scanProgressText.textContent = 'Starting selected scanner adapters...';
+
+        scanStartTime = Date.now();
+        if (scanTimerInterval) clearInterval(scanTimerInterval);
+        scanTimerInterval = setInterval(() => {
+            const elapsed = Math.round((Date.now() - scanStartTime) / 1000);
+            if (scanProgressTimer) scanProgressTimer.textContent = `${elapsed}s`;
+        }, 1000);
+
+        postToHost({
+            command: 'scanRepository',
+            scannerIds: scannerIds,
+            targetRepo: currentConfig.activeRepo
+        });
+    }
+
+    function handleScanProgress(data) {
+        if (!data) return;
+        if (scanProgressCard) scanProgressCard.style.display = 'block';
+        if (data.percent !== undefined && scanProgressBarFill) {
+            scanProgressBarFill.style.width = `${Math.min(100, Math.max(5, data.percent))}%`;
+        }
+        if (data.message && scanProgressText) {
+            scanProgressText.textContent = data.message;
+        }
+    }
+
+    function handleScanCompleted(data) {
+        if (scanTimerInterval) {
+            clearInterval(scanTimerInterval);
+            scanTimerInterval = null;
+        }
+        if (btnStartScan) btnStartScan.disabled = false;
+        if (btnCancelScan) btnCancelScan.style.display = 'none';
+        if (scanProgressBarFill) scanProgressBarFill.style.width = '100%';
+        if (scanProgressText) scanProgressText.textContent = `Scan complete: ${data.findingsCount || 0} finding(s) discovered`;
+
+        setTimeout(() => {
+            if (scanProgressCard) scanProgressCard.style.display = 'none';
+        }, 3000);
+
+        showToast(`Scan completed: ${data.findingsCount || 0} findings discovered`, 'success');
+        postToHost({ command: 'getScanHistory' });
+        postToHost({ command: 'requestData' });
+    }
+
+    function handleScanError(data) {
+        if (scanTimerInterval) {
+            clearInterval(scanTimerInterval);
+            scanTimerInterval = null;
+        }
+        if (btnStartScan) btnStartScan.disabled = false;
+        if (btnCancelScan) btnCancelScan.style.display = 'none';
+        if (scanProgressCard) scanProgressCard.style.display = 'none';
+        showToast(data.error || 'Vulnerability scan failed', 'error');
+    }
+
+    function renderScannersCards(scanners) {
+        if (!scannersCardsGrid) return;
+        if (!scanners || scanners.length === 0) {
+            scannersCardsGrid.innerHTML = '<div class="empty-state">No scanner adapters discovered.</div>';
+            return;
+        }
+
+        scannersCardsGrid.innerHTML = '';
+        scanners.forEach(s => {
+            const card = document.createElement('div');
+            card.className = 'scanner-card';
+            const statusClass = s.status === 'Ready' ? 'badge-success' : (s.status === 'Running' ? 'badge-info' : 'badge-secondary');
+
+            card.innerHTML = `
+                <div class="scanner-card-header">
+                    <div>
+                        <div class="scanner-card-title">${escapeHtml(s.name)}</div>
+                        <div class="scanner-card-id">${escapeHtml(s.id)} v${escapeHtml(s.version || '1.0')}</div>
+                    </div>
+                    <span class="badge ${statusClass}">${escapeHtml(s.status || 'Ready')}</span>
+                </div>
+                <div class="scanner-card-body">
+                    <p class="scanner-card-desc">${escapeHtml(s.description || 'Static analysis and security verification module.')}</p>
+                    <div class="scanner-meta-row">
+                        <span class="scanner-meta-label">Rules:</span>
+                        <span class="scanner-meta-val">${s.rulesCount || (s.rules ? s.rules.length : 'Configured')}</span>
+                        <span class="scanner-meta-label" style="margin-left: 12px;">Targets:</span>
+                        <span class="scanner-meta-val font-mono">${escapeHtml((s.languages || ['csharp']).join(', '))}</span>
+                    </div>
+                </div>
+            `;
+            scannersCardsGrid.appendChild(card);
+        });
+    }
+
+    function renderScanHistory(history) {
+        if (!scanHistoryTableBody) return;
+        if (!history || history.length === 0) {
+            scanHistoryTableBody.innerHTML = '<tr><td colspan="6" class="empty-cell" style="text-align: center; padding: 24px; color: var(--text-muted);">No scan history recorded yet. Run a scan to discover local vulnerabilities.</td></tr>';
+            return;
+        }
+
+        scanHistoryTableBody.innerHTML = '';
+        history.forEach(item => {
+            const tr = document.createElement('tr');
+            const statusClass = item.status === 'Completed' ? 'badge-success' : (item.status === 'Failed' ? 'badge-danger' : 'badge-warning');
+            const durationSec = item.durationMs ? `${(item.durationMs / 1000).toFixed(1)}s` : '--';
+            const dateStr = item.startTime ? new Date(item.startTime).toLocaleTimeString() : '--';
+            const targetBase = item.targetDir ? item.targetDir.split(/[/\\]/).filter(Boolean).pop() : 'workspace';
+            const counts = item.findingsSummary || { critical: 0, high: 0, medium: 0, low: 0, total: 0 };
+
+            tr.innerHTML = `
+                <td><span class="font-mono" style="font-weight: 600; font-size: 11px;">${escapeHtml(item.scanId || '--')}</span></td>
+                <td><span style="font-size: 11px; color: var(--text-muted);">${escapeHtml(dateStr)}</span></td>
+                <td><span class="font-mono" style="font-size: 11px;">${escapeHtml(targetBase)}</span></td>
+                <td><span style="font-size: 11px;">${durationSec}</span></td>
+                <td><span class="badge ${statusClass}">${escapeHtml(item.status || 'Completed')}</span></td>
+                <td>
+                    <span style="font-weight: 600;">${counts.total || 0}</span>
+                    <span style="font-size: 11px; color: var(--text-muted); margin-left: 4px;">
+                        (${counts.critical || 0} crit / ${counts.high || 0} high / ${counts.medium || 0} med)
+                    </span>
+                </td>
+            `;
+            scanHistoryTableBody.appendChild(tr);
+        });
+    }
+
+    // --------------------------------------------------------------------------
     // Reports View Renderer
     // --------------------------------------------------------------------------
     function renderReportsList() {
@@ -2040,9 +2347,15 @@
         }, 100);
     }
 
-    function openCopilotModal(prompt) {
+    function openCopilotModal(prompt, manualSubmission = true) {
         if (!copilotModal) return;
         if (copilotCommandText) copilotCommandText.textContent = prompt;
+        const modalSub = document.querySelector('#copilotModal .modal-subtitle');
+        if (modalSub) {
+            modalSub.textContent = manualSubmission
+                ? 'Manual submission required: Press Enter in Copilot Chat to begin remediation.'
+                : 'Copy and execute in Copilot Chat';
+        }
         copilotModal.style.display = 'flex';
     }
 
@@ -2114,27 +2427,132 @@
         return html;
     }
 
-    function renderMarkdown(md) {
-        if (!md) return '';
-        return md
-            .replace(/^# (.*$)/gim, '<h2>$1</h2>')
-            .replace(/^## (.*$)/gim, '<h3>$1</h3>')
-            .replace(/^### (.*$)/gim, '<h4>$1</h4>')
-            .replace(/\*\*(.*)\*\*/gim, '<b>$1</b>')
-            .replace(/\*(.*)\*/gim, '<i>$1</i>')
-            .replace(/`([^`]+)`/gim, '<code>$1</code>')
-            .replace(/^\- (.*$)/gim, '<li>$1</li>')
-            .replace(/\n\n/gim, '<p></p>');
-    }
-
     function escapeHtml(text) {
-        if (!text) return '';
+        if (text === null || text === undefined) return '';
         return String(text)
             .replace(/&/g, '&amp;')
             .replace(/</g, '&lt;')
             .replace(/>/g, '&gt;')
             .replace(/"/g, '&quot;')
             .replace(/'/g, '&#039;');
+    }
+
+    function renderMarkdown(rawMd) {
+        if (!rawMd) return '';
+        // 1. Strictly escape all raw text first to neutralize any injected HTML or scripts
+        const escaped = escapeHtml(rawMd);
+
+        // 2. Process code fences ```lang\ncode\n``` safely
+        const codeBlocks = [];
+        let textWithoutBlocks = escaped.replace(/```([a-zA-Z0-9_-]*)\n([\s\S]*?)```/g, (match, lang, code) => {
+            const placeholder = `__CODE_BLOCK_${codeBlocks.length}__`;
+            codeBlocks.push(`<pre><code class="language-${lang || 'text'}">${code.trim()}</code></pre>`);
+            return placeholder;
+        });
+
+        // 3. Process tables | col1 | col2 |
+        const tableBlocks = [];
+        textWithoutBlocks = textWithoutBlocks.replace(/(?:^|\n)(\|(?:[^\n]+\|)+)(?:\n\|(?:[ :\-]+(?:\|[ :\-]+)+))((?:\n\|(?:[^\n]+\|)+)+)/g, (match, headerRow, bodyRows) => {
+            const placeholder = `__TABLE_BLOCK_${tableBlocks.length}__`;
+            const parseRow = (r, isHeader) => {
+                const cells = r.split('|').slice(1, -1).map(c => c.trim());
+                const tag = isHeader ? 'th' : 'td';
+                return `<tr>${cells.map(c => `<${tag}>${c}</${tag}>`).join('')}</tr>`;
+            };
+            const headerHtml = `<thead>${parseRow(headerRow, true)}</thead>`;
+            const bodyHtml = `<tbody>${bodyRows.trim().split('\n').map(r => parseRow(r, false)).join('')}</tbody>`;
+            tableBlocks.push(`<div class="table-responsive"><table class="markdown-table">${headerHtml}${bodyHtml}</table></div>`);
+            return placeholder;
+        });
+
+        // 4. Line-by-line transformations
+        const lines = textWithoutBlocks.split('\n');
+        const formatted = [];
+        let inList = false;
+
+        for (let i = 0; i < lines.length; i++) {
+            let line = lines[i];
+
+            // Headers
+            if (/^### (.*$)/.test(line)) {
+                if (inList) { formatted.push('</ul>'); inList = false; }
+                formatted.push(line.replace(/^### (.*$)/, '<h4>$1</h4>'));
+                continue;
+            }
+            if (/^## (.*$)/.test(line)) {
+                if (inList) { formatted.push('</ul>'); inList = false; }
+                formatted.push(line.replace(/^## (.*$)/, '<h3>$1</h3>'));
+                continue;
+            }
+            if (/^# (.*$)/.test(line)) {
+                if (inList) { formatted.push('</ul>'); inList = false; }
+                formatted.push(line.replace(/^# (.*$)/, '<h2>$1</h2>'));
+                continue;
+            }
+
+            // Checkbox lists
+            if (/^\s*[-*]\s*\[([ xX])\]\s*(.*$)/.test(line)) {
+                if (!inList) { formatted.push('<ul class="markdown-checklist">'); inList = true; }
+                formatted.push(line.replace(/^\s*[-*]\s*\[([ xX])\]\s*(.*$)/, (m, mark, item) => {
+                    const checked = mark.toLowerCase() === 'x';
+                    return `<li class="checklist-item"><input type="checkbox" disabled ${checked ? 'checked' : ''}> <span>${item}</span></li>`;
+                }));
+                continue;
+            }
+
+            // Unordered list items
+            if (/^\s*[-*]\s+(.*$)/.test(line)) {
+                if (!inList) { formatted.push('<ul>'); inList = true; }
+                formatted.push(line.replace(/^\s*[-*]\s+(.*$)/, '<li>$1</li>'));
+                continue;
+            }
+
+            // Blockquotes
+            if (/^&gt;\s*(.*$)/.test(line)) {
+                if (inList) { formatted.push('</ul>'); inList = false; }
+                formatted.push(line.replace(/^&gt;\s*(.*$)/, '<blockquote>$1</blockquote>'));
+                continue;
+            }
+
+            // End list if non-list line
+            if (inList && line.trim() === '') {
+                formatted.push('</ul>');
+                inList = false;
+            }
+
+            // Empty line
+            if (line.trim() === '') {
+                formatted.push('');
+                continue;
+            }
+
+            // Normal line
+            formatted.push(`<p>${line}</p>`);
+        }
+
+        if (inList) {
+            formatted.push('</ul>');
+        }
+
+        let outputHtml = formatted.join('\n');
+
+        // Inline formatting (bold, italic, code)
+        outputHtml = outputHtml
+            .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+            .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+            .replace(/`([^`]+)`/g, '<code>$1</code>');
+
+        // Restore code blocks
+        codeBlocks.forEach((block, idx) => {
+            outputHtml = outputHtml.replace(`__CODE_BLOCK_${idx}__`, block);
+        });
+
+        // Restore tables
+        tableBlocks.forEach((tbl, idx) => {
+            outputHtml = outputHtml.replace(`__TABLE_BLOCK_${idx}__`, tbl);
+        });
+
+        return outputHtml;
     }
 
     // Auto-initialize on load

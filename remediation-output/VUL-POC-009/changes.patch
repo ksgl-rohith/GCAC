@@ -1,0 +1,16 @@
+--- a/src/main/java/com/example/customer/controller/DocumentDownloadController.java
++++ b/src/main/java/com/example/customer/controller/DocumentDownloadController.java
+@@ -32,6 +32,12 @@
+     @GetMapping("/download/{filename:.+}")
+     public ResponseEntity<Resource> downloadFile(@PathVariable String filename) {
+         // Vulnerable line
+-        Path filePath = Paths.get("downloads").resolve(filename).normalize();
++        Path filePath = Paths.get("downloads").resolve(filename).normalize();
++        
++        // Validate the file path
++        if (!filePath.startsWith(Paths.get("downloads").toAbsolutePath())) {
++            throw new IllegalArgumentException("Invalid file path");
++        }
+         
+         Resource resource = new UrlResource(filePath.toUri());
+         if (!resource.exists()) {
