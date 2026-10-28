@@ -18,11 +18,7 @@ const csvPath = path.join(workspaceRoot, 'vulnerability', 'vulnerabilities.csv')
 const mediaDir = path.join(workspaceRoot, 'extension', 'media');
 
 const findingsStore = new FindingsStore(workspaceRoot);
-const scanController = new ScanController(workspaceRoot, findingsStore);
-scanController.registerScanner(new SecretsConfigScanner(workspaceRoot));
-scanController.registerScanner(new DotnetSecurityScanner(workspaceRoot));
-scanController.registerScanner(new NugetAuditScanner(workspaceRoot));
-scanController.registerScanner(new CodeQLScanner(workspaceRoot));
+const scanController = new ScanController(workspaceRoot, { findingsStore });
 
 const reScanVerifier = new ReScanVerifier(workspaceRoot, scanController);
 const engine = new RemediationEngine(workspaceRoot, findingsStore, reScanVerifier);
@@ -325,7 +321,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/scanners') {
-        const scanners = scanController.getScannersInfo();
+        const scanners = await scanController.getAvailableScanners();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(scanners));
         return;

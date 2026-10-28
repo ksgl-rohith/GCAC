@@ -84,6 +84,16 @@ class CodeQLScanner extends ScannerAdapter {
                     const sev = res.level === 'error' ? SEVERITY_LEVELS.HIGH : 
                                (res.level === 'warning' ? SEVERITY_LEVELS.MEDIUM : SEVERITY_LEVELS.LOW);
 
+                    let normalizedPath = uri.replace(/\\/g, '/');
+                    if (normalizedPath.startsWith('file:///')) {
+                        normalizedPath = normalizedPath.substring(7);
+                    } else if (normalizedPath.startsWith('file://')) {
+                        normalizedPath = normalizedPath.substring(6);
+                    }
+                    if (path.isAbsolute(normalizedPath) && workspaceRoot) {
+                        normalizedPath = path.relative(workspaceRoot, normalizedPath).replace(/\\/g, '/');
+                    }
+
                     const finding = new NormalizedFinding({
                         scanId,
                         scannerId: this.id,
@@ -94,7 +104,7 @@ class CodeQLScanner extends ScannerAdapter {
                         severity: sev,
                         cwe,
                         confidence: 'High',
-                        filePath: uri.replace(/\\/g, '/'),
+                        filePath: normalizedPath,
                         line: region.startLine || 1,
                         column: region.startColumn || 1,
                         evidence: res.message?.text || '',
@@ -107,6 +117,26 @@ class CodeQLScanner extends ScannerAdapter {
         } catch (e) {}
 
         return findings;
+    }
+
+    /**
+     * Detects target primary language for CodeQL database extraction
+     */
+    _detectLanguage(targetDir) {
+        try {
+            const files = fs.readdirSync(targetDir, { recursive: true });
+            let hasCs = false, hasJs = false, hasPy = false;
+            for (const f of files) {
+                const str = String(f);
+                if (str.endsWith('.cs') || str.endsWith('.csproj') || str.endsWith('.sln')) hasCs = true;
+                if (str.endsWith('.js') || str.endsWith('.ts')) hasJs = true;
+                if (str.endsWith('.py')) hasPy = true;
+            }
+            if (hasCs) return { language: 'csharp', suite: 'codeql/csharp-queries:codeql-suites/csharp-code-scanning.qls', buildMode: '--build-mode=none' };
+            if (hasJs) return { language: 'javascript', suite: 'codeql/javascript-queries:codeql-suites/javascript-code-scanning.qls', buildMode: '' };
+            if (hasPy) return { language: 'python', suite: 'codeql/python-queries:codeql-suites/python-code-scanning.qls', buildMode: '' };
+        } catch (e) {}
+        return { language: 'csharp', suite: 'codeql/csharp-queries:codeql-suites/csharp-code-scanning.qls', buildMode: '--build-mode=none' };
     }
 
     async scan(workspaceRoot, targetPath, options = {}) {
@@ -128,20 +158,25 @@ class CodeQLScanner extends ScannerAdapter {
             };
         }
 
-        // If CodeQL is installed on machine:
+        const scanTarget = targetPath || workspaceRoot;
         const tempDbDir = path.join(os.tmpdir(), `gcac-codeql-${Date.now()}`);
         const sarifOutputFile = path.join(os.tmpdir(), `gcac-codeql-out-${Date.now()}.sarif`);
+        const { language, suite, buildMode } = this._detectLanguage(scanTarget);
 
         try {
             // 1. Create database in temp directory (bounded execution)
-            execSync(`codeql database create "${tempDbDir}" --language=csharp --source-root="${targetPath || workspaceRoot}" --overwrite`, {
-                timeout: options.timeoutMs || 120000,
+            const createCmd = buildMode 
+                ? `codeql database create "${tempDbDir}" --language=${language} ${buildMode} --source-root="${scanTarget}" --overwrite`
+                : `codeql database create "${tempDbDir}" --language=${language} --source-root="${scanTarget}" --overwrite`;
+
+            execSync(createCmd, {
+                timeout: options.timeoutMs || 180000,
                 stdio: 'ignore'
             });
 
             // 2. Analyze database with official queries and output to SARIF
-            execSync(`codeql database analyze "${tempDbDir}" csharp-security-and-quality.qls --format=sarif-latest --output="${sarifOutputFile}"`, {
-                timeout: options.timeoutMs || 120000,
+            execSync(`codeql database analyze "${tempDbDir}" "${suite}" --format=sarif-latest --output="${sarifOutputFile}"`, {
+                timeout: options.timeoutMs || 180000,
                 stdio: 'ignore'
             });
 
@@ -156,7 +191,7 @@ class CodeQLScanner extends ScannerAdapter {
                     durationMs: Date.now() - startTime,
                     errors: [],
                     warnings: [],
-                    coverage: '100% (SARIF analysis complete)'
+                    coverage: `100% (CodeQL ${language} analysis complete)`
                 };
             }
 

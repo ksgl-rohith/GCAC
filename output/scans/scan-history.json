@@ -1,0 +1,71 @@
+[
+  {
+    "scanId": "SCAN-1793161128645",
+    "timestamp": "2026-10-28T04:19:49.257Z",
+    "targetPath": "sample-repos/payments-api",
+    "durationMs": 60612,
+    "status": "Partial",
+    "scannersCount": 4,
+    "findingsSummary": {
+      "total": 5,
+      "critical": 1,
+      "high": 4,
+      "medium": 0,
+      "low": 0,
+      "informational": 0
+    },
+    "ingestStats": {
+      "added": 0,
+      "updated": 5,
+      "total": 17,
+      "newCount": 0,
+      "updatedCount": 5
+    }
+  },
+  {
+    "scanId": "SCAN-1793159254477",
+    "timestamp": "2026-10-28T03:47:34.531Z",
+    "targetPath": ".",
+    "durationMs": 54,
+    "status": "Partial",
+    "scannersCount": 3,
+    "findingsSummary": {
+      "total": 17,
+      "critical": 6,
+      "high": 11,
+      "medium": 0,
+      "low": 0,
+      "informational": 0
+    },
+    "ingestStats": {
+      "added": 0,
+      "updated": 17,
+      "total": 17,
+      "newCount": 0,
+      "updatedCount": 17
+    }
+  },
+  {
+    "scanId": "SCAN-1793159220513",
+    "timestamp": "2026-10-28T03:47:00.596Z",
+    "targetPath": ".",
+    "durationMs": 83,
+    "status": "Partial",
+    "scannersCount": 3,
+    "findingsSummary": {
+      "total": 17,
+      "critical": 6,
+      "high": 11,
+      "medium": 0,
+      "low": 0,
+      "informational": 0
+    },
+    "ingestStats": {
+      "added": 17,
+      "updated": 0,
+      "total": 17,
+      "newCount": 17,
+      "updatedCount": 0
+    }
+  }
+]

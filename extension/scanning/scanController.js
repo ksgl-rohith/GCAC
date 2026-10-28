@@ -64,7 +64,10 @@ class ScanController {
      */
     async getAvailableScanners() {
         const result = [];
-        for (const [id, scanner] of this.scanners.entries()) {
+        const seen = new Set();
+        for (const scanner of this.scanners.values()) {
+            if (seen.has(scanner.id)) continue;
+            seen.add(scanner.id);
             try {
                 const avail = await scanner.isAvailable();
                 result.push({
@@ -74,8 +77,12 @@ class ScanController {
                     available: avail.available,
                     reason: avail.reason || '',
                     status: avail.available ? SCANNER_STATUS.READY : SCANNER_STATUS.NOT_INSTALLED,
+                    description: scanner.description || `${scanner.name} security analyzer module.`,
+                    languages: scanner.supportedLanguages,
                     supportedLanguages: scanner.supportedLanguages,
-                    supportedCategories: scanner.supportedCategories
+                    categories: scanner.supportedCategories,
+                    supportedCategories: scanner.supportedCategories,
+                    rulesCount: scanner.rulesCount || (scanner.rules ? scanner.rules.length : 'Configured')
                 });
             } catch (e) {
                 result.push({
@@ -85,8 +92,12 @@ class ScanController {
                     available: false,
                     reason: e.message,
                     status: SCANNER_STATUS.UNAVAILABLE,
+                    description: scanner.description || `${scanner.name} security analyzer module.`,
+                    languages: scanner.supportedLanguages,
                     supportedLanguages: scanner.supportedLanguages,
-                    supportedCategories: scanner.supportedCategories
+                    categories: scanner.supportedCategories,
+                    supportedCategories: scanner.supportedCategories,
+                    rulesCount: 0
                 });
             }
         }
@@ -147,12 +158,17 @@ class ScanController {
         // 3. Resolve scanners to run
         const selectedIds = Array.isArray(scanRequest.scannerIds) && scanRequest.scannerIds.length > 0
             ? scanRequest.scannerIds
-            : Array.from(this.scanners.keys());
+            : Array.from(new Set(Array.from(this.scanners.values()).map(s => s.id)));
 
         const activeAdapters = [];
+        const seenAdapters = new Set();
         for (const id of selectedIds) {
             if (this.scanners.has(id)) {
-                activeAdapters.push(this.scanners.get(id));
+                const adapter = this.scanners.get(id);
+                if (!seenAdapters.has(adapter.id)) {
+                    seenAdapters.add(adapter.id);
+                    activeAdapters.push(adapter);
+                }
             }
         }
 

@@ -149,11 +149,13 @@ All existing Milestone A governance, row isolation, and Copilot Chat invocation 
 - **Credential Masking**: All discovered credentials in evidence strings are masked with `sk_live_****<last4>` or `AKIA****<last4>`. Unmasked raw secret values are never rendered in the UI or serialized into reports.
 - **Scope & Exclusions**: Automatically excludes `.git`, `bin`, `obj`, `node_modules`, `output`, and binaries (`.dll`, `.exe`, `.pdb`).
 
-### Scanner D — Optional GitHub CodeQL CLI
-- **Engine**: Local CodeQL CLI (`codeql database create` and `codeql database analyze`).
-- **SARIF Integration**: Fully parses official CodeQL SARIF 2.1.0 result runs.
-- **Zero Lock-In**: Strictly optional. If `codeql` binary is not installed on PATH, the scanner marks its status as `Not Installed` and allows the other approved scanners to proceed unhindered.
-- **Privacy & Sandbox**: CodeQL databases are generated exclusively inside a temporary sandbox directory outside source trees and cleaned up after execution. Results are never uploaded to GitHub or external servers.
+### Scanner D — Integrated GitHub CodeQL CLI
+- **Engine**: Local CodeQL CLI (`/opt/homebrew/bin/codeql` v2.27.3).
+- **Installed Query Packs**: `codeql/csharp-queries@1.10.2`, `codeql/javascript-queries@2.4.8`, and `codeql/python-queries@1.8.13`.
+- **Zero-Build C# Semantic Extraction**: Uses modern `--build-mode=none` for standalone C# AST and data-flow extraction without requiring full solution build infrastructure.
+- **SARIF Integration**: Fully parses official CodeQL SARIF 2.1.0 result runs, extracting rules, CWE tags, physical locations, and remediation advice.
+- **Privacy & Sandbox**: CodeQL databases and SARIF exports are generated strictly inside temporary OS sandbox directories (`os.tmpdir()`) outside the workspace tree and automatically purged after execution. Results are never uploaded to GitHub or external servers.
+- **Real-Time Execution Verified**: Executed live against `sample-repos/payments-api`, completing full semantic analysis in real time alongside local Roslyn and Secrets scanners.
 
 ---
 
