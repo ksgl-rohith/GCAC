@@ -51,7 +51,8 @@ function run() {
     // Valid messages
     assert.strictEqual(validateWebviewMessage({ command: 'getConfig' }).valid, true);
     assert.strictEqual(validateWebviewMessage({ command: 'loadDetails', vulnerabilityId: 'VUL-POC-001' }).valid, true);
-    assert.strictEqual(validateWebviewMessage({ command: 'runRemediation', vulnerabilityId: 'GCAS-E2E-001' }).valid, true);
+    assert.strictEqual(validateWebviewMessage({ command: 'launchCopilot', vulnerabilityId: 'GCAS-E2E-001' }).valid, true);
+    assert.strictEqual(validateWebviewMessage({ command: 'runRemediation', vulnerabilityId: 'GCAS-E2E-001' }).valid, false, 'Simulated runRemediation IPC must be rejected');
     assert.strictEqual(validateWebviewMessage({ command: 'approveRemediation', vulnerabilityId: 'VUL-POC-008' }).valid, true);
 
     // Invalid commands (Arbitrary command execution injection)

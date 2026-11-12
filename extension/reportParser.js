@@ -6,6 +6,17 @@ const {
     SCREEN_OUTCOME
 } = require('./contentInjectionScreen');
 const { verifyEvidencePackage } = require('./evidenceLedger');
+const {
+    RUN_STATE_SCHEMA_VERSION,
+    WORKFLOW_LIFECYCLE,
+    VALIDATION_OUTCOME,
+    APPROVAL_DECISION,
+    FORMAL_CLOSURE,
+    FINDING_STATE,
+    normalizeCanonicalRunState,
+    deriveTerminalBanner
+} = require('./runStateContract');
+const { buildEvidenceChecklist } = require('./evidenceChecklist');
 
 /**
  * Normalizes a vulnerability ID or filename token for safe, deterministic matching.
@@ -76,98 +87,137 @@ function loadVulnerabilityDetails(workspaceRoot, vulnerabilityId) {
         failureCategory: null,
         failureReason: null,
         retryEligibility: null,
+        schemaVersion: RUN_STATE_SCHEMA_VERSION,
+        workflowLifecycle: WORKFLOW_LIFECYCLE.NOT_STARTED,
+        securityValidationOutcome: VALIDATION_OUTCOME.NOT_EXECUTED,
+        approvalDecision: APPROVAL_DECISION.NOT_REQUESTED,
+        formalClosure: FORMAL_CLOSURE.OPEN,
+        findingState: FINDING_STATE.OPEN,
+        terminalBanner: '',
+        handoff: null,
+        lastAppliedSeq: 0,
         stages: [
             {
-                id: 'classification',
-                name: 'Classification Agent',
+                id: 'intake',
+                name: 'Stage 1: Intake & Mapping',
                 number: 1,
+                stageNumber: 1,
                 type: 'agent',
                 status: 'pending',
-                summary: 'Read vulnerabilities, classify by severity, CWE, type, assess complexity & prioritize.',
+                summary: 'Resolve single finding identity, canonical repository path, and file context.',
                 bullets: [
-                    'Read vulnerabilities from repository',
-                    'Classify by severity, CWE, type',
-                    'Assess complexity & exploitability',
-                    'Prioritize remediation strategy'
+                    'Validate single-finding metadata',
+                    'Resolve canonical repository root',
+                    'Build isolated workspace context'
                 ]
             },
             {
-                id: 'code-analysis',
-                name: 'Code Analysis Agent',
+                id: 'classification',
+                name: 'Stage 2: Classification Agent',
                 number: 2,
+                stageNumber: 2,
                 type: 'agent',
                 status: 'pending',
-                summary: 'Locate vulnerable code, analyze data flow, call flow & identify root cause.',
+                summary: 'Classify vulnerability severity, CWE, remediation route & priority.',
+                bullets: [
+                    'Classify by severity, CWE, type',
+                    'Enforce immutable scanner severity',
+                    'Assess exploitability & prioritize strategy'
+                ]
+            },
+            {
+                id: 'analysis',
+                name: 'Stage 3: Source Analysis & Baseline',
+                number: 3,
+                stageNumber: 3,
+                type: 'agent',
+                status: 'pending',
+                summary: 'Locate vulnerable code, analyze data flow, baseline build/test & prepare proposal.',
                 bullets: [
                     'Locate vulnerable code (file, line)',
-                    'Analyze data flow & call flow',
-                    'Understand context & dependencies',
-                    'Identify root cause'
-                ]
-            },
-            {
-                id: 'remediation',
-                name: 'Remediation Agent',
-                number: 3,
-                type: 'agent',
-                status: 'pending',
-                summary: 'Determine secure fix strategy, generate code patch & change summary.',
-                bullets: [
-                    'Determine secure fix strategy',
-                    'Generate .NET code changes (patch)',
-                    'Follow best practices & secure coding',
-                    'Prepare change summary',
-                    'Only uses existing remediation & knowledge if not stale'
+                    'Trace source-to-sink data flow',
+                    'Run baseline tests & prepare minimal patch proposal'
                 ]
             },
             {
                 id: 'human-gate',
-                name: 'Human Approval Gate',
+                name: 'Stage 4: Human Approval Gate',
                 number: 4,
+                stageNumber: 4,
                 type: 'gate',
                 status: 'pending',
-                summary: 'Review vulnerability analysis and proposed secure fix before bench testing.',
+                summary: 'Review root-cause analysis and proposed code diff before workspace mutation.',
                 bullets: [
-                    'Review vulnerability analysis and proposed fix',
-                    'Authorize code modification or request rework'
+                    'Review vulnerability analysis and diff-bound proposal',
+                    'Authorize isolated code modification or request rework'
+                ]
+            },
+            {
+                id: 'remediation',
+                name: 'Stage 5: Isolated Code Remediation',
+                number: 5,
+                stageNumber: 5,
+                type: 'agent',
+                status: 'pending',
+                summary: 'Apply approved code changes strictly within file-scope inside isolated worktree.',
+                bullets: [
+                    'Verify diff-bound Stage 4 authorization',
+                    'Apply approved patch inside isolated git worktree',
+                    'Enforce post-apply scope and test protection rules'
                 ]
             },
             {
                 id: 'bench-test',
-                name: 'Bench Test',
-                number: 5,
+                name: 'Stage 6: Bench Test & Re-Scan',
+                number: 6,
+                stageNumber: 6,
                 type: 'agent',
                 status: 'pending',
-                summary: 'Create/update unit tests, cover vulnerable scenarios & validate fix.',
+                summary: 'Execute real build/unit tests and run targeted post-fix scanner verification.',
                 bullets: [
-                    'Create / update unit tests',
-                    'Cover vulnerable scenario',
-                    'Validate fix with targeted tests',
-                    'Retry on test failure loop'
+                    'Execute targeted unit tests in approved runner',
+                    'Re-scan modified file with originating scanner',
+                    'Fail closed on build errors, zero tests, or regression'
+                ]
+            },
+            {
+                id: 'security-review',
+                name: 'Stage 7: Security Review & Evidence',
+                number: 7,
+                stageNumber: 7,
+                type: 'agent',
+                status: 'pending',
+                summary: 'Evaluate deterministic security evidence checklist across patch, tests, and re-scan.',
+                bullets: [
+                    'Inspect test execution & originating scanner results',
+                    'Audit secret rotation / externalization requirements',
+                    'Verify SHA-256 evidence manifest completeness'
                 ]
             },
             {
                 id: 'final-human-gate',
-                name: 'Final Human Approval Gate',
-                number: 6,
+                name: 'Stage 8: Final Human Sign-Off',
+                number: 8,
+                stageNumber: 8,
                 type: 'gate',
                 status: 'pending',
-                summary: 'Final human sign-off before workflow exit and team hand-off.',
+                summary: 'Final human review gate prior to formal closure (blocked unless validation passed).',
                 bullets: [
-                    'Final Human Approval before workflow exit',
-                    'Verify test evidence & audit compliance'
+                    'Confirm verified validation & evidence checklist',
+                    'Sign off or request revision/rework'
                 ]
             },
             {
                 id: 'manual-validations',
-                name: 'Final Manual Validations',
-                number: 7,
+                name: 'Stage 9: Workflow Closure',
+                number: 9,
+                stageNumber: 9,
                 type: 'non-agentic',
                 status: 'pending',
-                summary: 'Non-agentic workflow for Regression Testing & CI/CD Deployment by App Owners.',
+                summary: 'Conclude workflow, persist immutable ledger, and record operational handoff state.',
                 bullets: [
-                    'Regression Testing - To be performed by App Owners',
-                    'Deployment - Through existing CI/CD Pipeline performed by App Owners'
+                    'Record final canonical workflow & validation status',
+                    'Persist tamper-detectable evidence manifest & trace'
                 ]
             }
         ]
@@ -261,7 +311,8 @@ function loadVulnerabilityDetails(workspaceRoot, vulnerabilityId) {
             const runStatePath = path.join(dir, 'run-state.json');
             if (fs.existsSync(runStatePath) && !details.runState) {
                 try {
-                    const rs = JSON.parse(fs.readFileSync(runStatePath, 'utf-8'));
+                    const rawRs = JSON.parse(fs.readFileSync(runStatePath, 'utf-8'));
+                    const rs = normalizeCanonicalRunState(rawRs, vulnerabilityId);
                     details.runState = rs;
                     details.runId = rs.runId || null;
                     details.attemptId = rs.attemptId || null;
@@ -273,12 +324,37 @@ function loadVulnerabilityDetails(workspaceRoot, vulnerabilityId) {
                     details.failureCategory = rs.failureCategory || null;
                     details.failureReason = rs.failureReason || null;
                     details.retryEligibility = rs.retryEligibility || null;
+                    details.workflowLifecycle = rs.workflowLifecycle;
+                    details.securityValidationOutcome = rs.securityValidationOutcome;
+                    details.approvalDecision = rs.approvalDecision;
+                    details.formalClosure = rs.formalClosure;
+                    details.findingState = rs.findingState;
+                    details.terminalBanner = rs.terminalBanner;
+                    details.handoff = rs.handoff || null;
+                    details.lastAppliedSeq = Number(rs.lastAppliedSeq || 0);
                     details.findingContext = rs.findingContext || details.findingContext;
                     if (!details.validation && rs.postFixValidation) details.validation = rs.postFixValidation;
                     if (!details.baselineValidation && rs.baselineValidation) details.baselineValidation = rs.baselineValidation;
                     if (!details.reScanVerification && rs.reScanVerification) details.reScanVerification = rs.reScanVerification;
                     if (!details.classification && rs.classification) details.classification = rs.classification;
                     if (!details.securityReview && rs.securityReview) details.securityReview = rs.securityReview;
+
+                    // Hydrate canonical 9 stages from persisted trusted run-state if available
+                    if (Array.isArray(rs.stages) && rs.stages.length === details.stages.length) {
+                        for (let si = 0; si < details.stages.length; si++) {
+                            if (rs.stages[si] && rs.stages[si].status && rs.stages[si].status !== 'pending') {
+                                details.stages[si] = {
+                                    ...details.stages[si],
+                                    status: rs.stages[si].status,
+                                    summary: rs.stages[si].summary || details.stages[si].summary,
+                                    durationSec: rs.stages[si].durationSec ?? details.stages[si].durationSec ?? null,
+                                    failureCategory: rs.stages[si].failureCategory || null,
+                                    evidenceRef: rs.stages[si].evidenceRef || null,
+                                    attemptId: rs.stages[si].attemptId || null
+                                };
+                            }
+                        }
+                    }
                 } catch (e) { }
             }
 
@@ -379,6 +455,28 @@ function loadVulnerabilityDetails(workspaceRoot, vulnerabilityId) {
     // Extract detailed timing metrics from trace logs
     details.timings = extractTimingsFromTrace(details.traceLog);
 
+    // Deterministic evidence verification checklist (eliminates arbitrary confidence score)
+    if (details.hasEvidence || details.reportMarkdown || details.runState) {
+        details.evidenceChecklist = buildEvidenceChecklist({
+            finding: details.finding || { Vulnerability_ID: vulnerabilityId },
+            classification: details.classification,
+            rca: details.classification || null,
+            sourceToSinkEvidence: details.sourceToSinkEvidence,
+            baselineValidation: details.baselineValidation,
+            patchDiff: details.patchDiff,
+            proposedDiffSha256: details.runState?.proposedDiffSha256 || details.approvalRecord?.proposedDiffSha256 || null,
+            approvalRecord: details.approvalRecord,
+            scopeVerification: details.runState?.scopeVerification || null,
+            validation: details.validation || details.diagnostics || null,
+            reScanVerification: details.reScanVerification,
+            requiresScannerReScan: Boolean(details.finding?.scannerId || details.reScanVerification),
+            securityReview: details.securityReview,
+            outcomeEvaluation: details.runState?.outcomeEvaluation || null,
+            integrityVerification: details.integrityVerification,
+            secretRemediation: details.runState?.secretRemediation || null
+        });
+    }
+
     return details;
 }
 
@@ -467,9 +565,6 @@ function extractEvidenceFromMarkdown(details) {
         const passedTests = countsMatch ? parseInt(countsMatch[2], 10) : 0;
         const failedTests = countsMatch ? parseInt(countsMatch[3], 10) : 0;
 
-        const scoreMatch = md.match(/Confidence Score\*\*:\s*\*\*?(\d+)(?:\/100)?/i) || md.match(/Score:\s*(\d+)\/100/i);
-        const score = scoreMatch ? parseInt(scoreMatch[1], 10) : 0;
-
         // Extract console output block
         let consoleOutput = '';
         const consoleMatch = md.match(/### Baseline Test Execution[\s\S]*?```(?:text)?\s*\n([\s\S]*?)```/i) ||
@@ -488,10 +583,9 @@ function extractEvidenceFromMarkdown(details) {
                 testsPassed: 0,
                 testsFailed: 0,
                 totalTests: 0,
-                confidenceScore: 0,
                 consoleOutput: 'BLOCKED — Untrusted Markdown report contained suspicious injection/forged markers.'
             };
-        } else if (hasPassedPostFix || exitCodeMatch || countsMatch || scoreMatch || consoleOutput) {
+        } else if (hasPassedPostFix || exitCodeMatch || countsMatch || consoleOutput) {
             const genuinePass = hasPassedPostFix && totalTests > 0 && failedTests === 0 && (exitCode === null || exitCode === 0);
             details.validation = {
                 isValidationPassed: genuinePass,
@@ -502,7 +596,6 @@ function extractEvidenceFromMarkdown(details) {
                 testsPassed: passedTests,
                 testsFailed: failedTests,
                 totalTests: totalTests,
-                confidenceScore: genuinePass ? score : Math.min(score, 40),
                 consoleOutput: consoleOutput || (totalTests > 0 ? `Validation completed. Test suite passed ${passedTests}/${totalTests} tests.` : 'No real test execution counts found in report.')
             };
         }
@@ -513,21 +606,19 @@ function extractEvidenceFromMarkdown(details) {
         if (markdownBlocked) {
             details.securityReview = {
                 rating: 'BLOCKED',
-                score: 0,
                 status: 'BLOCKED',
                 summary: `Markdown report failed untrusted content screening (${details.injectionScreening.ruleId}).`
             };
         } else {
             const ratingMatch = md.match(/Security Audit Rating\*\*:\s*\*\*([^\*]+)\*\*/i) || md.match(/Security Review Rating\s*:\s*\*\*([^\*]+)\*\*/i);
-            const scoreMatch = md.match(/Final Confidence Score\*\*:\s*\*\*?(\d+)/i);
-            if (ratingMatch || scoreMatch) {
+            const reviewStatusMatch = md.match(/Final Review Status\*\*:\s*\*\*([^\*]+)\*\*/i);
+            if (ratingMatch || reviewStatusMatch) {
                 const rawRating = ratingMatch ? ratingMatch[1].trim() : 'NOT_VERIFIED';
                 const hasRealTests = details.validation && details.validation.totalTests > 0 && details.validation.isValidationPassed;
                 const safeRating = (rawRating.toUpperCase() === 'PASS' && !hasRealTests) ? 'NOT_VERIFIED' : rawRating;
                 details.securityReview = {
                     rating: safeRating,
-                    score: scoreMatch ? parseInt(scoreMatch[1], 10) : 0,
-                    status: safeRating,
+                    status: reviewStatusMatch ? reviewStatusMatch[1].trim() : safeRating,
                     summary: 'Extracted from Markdown report.'
                 };
             }
@@ -558,60 +649,96 @@ function extractEvidenceFromMarkdown(details) {
 }
 
 /**
- * Infers the completion state of the 7 pipeline stages
- * Stage 1: Classification Agent
- * Stage 2: Code Analysis Agent
- * Stage 3: Remediation Agent
- * Stage 4: Human Approval Gate (Pre-Test Fix Authorization)
- * Stage 5: Bench Test
- * Stage 6: Final Human Approval Gate (Workflow Exit Sign-off)
- * Stage 7: Final Manual Validations (Non-Agentic Application Team Hand-off)
+ * Infers completion/failure states for the canonical 9-stage model
+ * (and remains compatible with legacy 7-slot caller mocks in tests).
+ *
+ * Canonical 9 Stages:
+ * 1: intake (idx 0)
+ * 2: classification (idx 1)
+ * 3: analysis (idx 2)
+ * 4: human-gate (idx 3)
+ * 5: remediation (idx 4)
+ * 6: bench-test (idx 5)
+ * 7: security-review (idx 6)
+ * 8: final-human-gate (idx 7)
+ * 9: manual-validations / closure (idx 8)
  */
 function inferStageStatuses(details) {
     const { reportMarkdown, validation, securityReview, patchDiff, traceLog, stages } = details;
+    if (!Array.isArray(stages) || stages.length === 0) return;
 
-    if (!details.hasEvidence && !reportMarkdown) {
+    const isLegacy7 = stages.length === 7;
+    const idx = isLegacy7
+        ? { intake: 0, classify: 0, analysis: 1, humanGate: 3, remediation: 2, benchTest: 4, secReview: 4, finalGate: 5, closure: 6 }
+        : { intake: 0, classify: 1, analysis: 2, humanGate: 3, remediation: 4, benchTest: 5, secReview: 6, finalGate: 7, closure: 8 };
+
+    if (!details.hasEvidence && !reportMarkdown && !details.runState) {
         return;
     }
 
     const report = reportMarkdown || '';
     const trace = traceLog || '';
 
-    // Stage 1: Classification Agent
+    // Copilot Handoff without engine execution: keep Stages 2-9 honest pending unless already advanced
+    const isCopilotHandoffPending = details.runState &&
+        (details.runState.workflowLifecycle === WORKFLOW_LIFECYCLE.HANDED_OFF_TO_COPILOT ||
+         details.runState.findingState === FINDING_STATE.AWAITING_VERIFIED_RESULT);
+    if (isCopilotHandoffPending && !report && !validation && !trace) {
+        if (stages[idx.intake]) {
+            stages[idx.intake].status = 'completed';
+            stages[idx.intake].summary = 'Finding handed off to Copilot Chat; awaiting verified execution.';
+        }
+        details.terminalBanner = deriveTerminalBanner(details);
+        return;
+    }
+
+    // Stage 1: Intake
+    if (!isLegacy7 && (details.finding || details.findingContext || details.runState || report)) {
+        stages[idx.intake].status = 'completed';
+        stages[idx.intake].summary = `Target mapped: ${details.finding?.applicationName || details.vulnerabilityId}`;
+    }
+
+    // Stage 2: Classification
     if (details.finding || details.classification || report.includes('Vulnerability Information') || trace.includes('[DISCOVERY]') || trace.includes('[CLASSIFY]')) {
-        stages[0].status = 'completed';
+        stages[idx.classify].status = 'completed';
         const sev = details.finding?.severity || 'Assessed';
         const cwe = details.classification?.cwe || details.finding?.detailedName || 'Vulnerability';
-        stages[0].summary = `Classified as ${sev} (${cwe}). Remediation route prioritized.`;
+        stages[idx.classify].summary = `Classified as ${sev} (${cwe}). Remediation route prioritized.`;
     }
 
-    // Stage 2: Code Analysis Agent
+    // Stage 3: Analysis / RCA & Baseline
     if (details.classification || report.includes('Code Analysis / RCA Agent') || report.includes('Root Cause') || trace.includes('code-analysis-rca') || trace.includes('[RCA]') || trace.includes('[ANALYZE]')) {
-        stages[1].status = 'completed';
-        stages[1].summary = details.classification?.strategy || 'RCA identified vulnerable data flow and call stack context.';
-    }
-
-    // Stage 3: Remediation Agent
-    let fixCompleted = false;
-    if (patchDiff || report.includes('## Remediation Agent') || report.includes('Remediation Strategy') || trace.includes('remediation') || trace.includes('[REMEDIATE]')) {
-        fixCompleted = true;
-        stages[2].status = 'completed';
-        stages[2].summary = 'Minimal secure code patch created and verified against AST.';
+        stages[idx.analysis].status = 'completed';
+        stages[idx.analysis].summary = details.classification?.strategy || 'RCA identified vulnerable data flow and call stack context.';
     }
 
     // Stage 4: Human Approval Gate (Pre-test fix authorization)
-    const isHumanApproved = report.includes('APPROVED') || report.includes('Human Review: Approved') || report.includes('STATUS: APPROVED') || trace.includes('Human Approval granted') || trace.includes('[GOVERNANCE_GATE] Human Approval');
-    const isAwaitingFirstApproval = report.includes('AWAITING_HUMAN_APPROVAL') || report.includes('Awaiting Human Review') || trace.includes('AWAITING_HUMAN_REVIEW');
+    const isHumanApproved = report.includes('APPROVED') || report.includes('Human Review: Approved') || report.includes('STATUS: APPROVED') ||
+        trace.includes('Human Approval granted') || trace.includes('[GOVERNANCE_GATE] Human Approval') ||
+        details.runState?.isApproved === true || details.runState?.approvalDecision === APPROVAL_DECISION.APPROVED_STAGE4;
+    const isAwaitingFirstApproval = report.includes('AWAITING_HUMAN_APPROVAL') || report.includes('Awaiting Human Review') ||
+        trace.includes('AWAITING_HUMAN_REVIEW') || details.runState?.status === 'AWAITING_HUMAN_APPROVAL';
 
-    if (isHumanApproved || (fixCompleted && (validation || report.includes('## Unit Test Agent') || report.includes('## Final Validation Agent')))) {
-        stages[3].status = 'completed';
-        stages[3].summary = 'Secure fix authorized by developer / security lead.';
-    } else if (isAwaitingFirstApproval || fixCompleted || (stages[0].status === 'completed' && stages[1].status === 'completed')) {
-        stages[3].status = 'awaiting_review';
-        stages[3].summary = 'Awaiting human review and authorization of proposed fix.';
+    let fixApplied = Boolean(patchDiff || trace.includes('[REMEDIATE]') || details.runState?.patchAppliedAtStage5 || report.includes('Isolated worktree updated'));
+    if (isLegacy7) {
+        fixApplied = Boolean(patchDiff || report.includes('## Remediation Agent') || report.includes('Remediation Strategy') || trace.includes('remediation') || trace.includes('[REMEDIATE]'));
     }
 
-    // Stage 5: Bench Test
+    if (isHumanApproved || (fixApplied && (validation || report.includes('## Unit Test Agent') || report.includes('## Final Validation Agent')))) {
+        stages[idx.humanGate].status = 'completed';
+        stages[idx.humanGate].summary = 'Secure fix authorized by developer / security lead.';
+    } else if (isAwaitingFirstApproval || (stages[idx.classify].status === 'completed' && stages[idx.analysis].status === 'completed')) {
+        stages[idx.humanGate].status = 'awaiting_review';
+        stages[idx.humanGate].summary = 'Awaiting human review and authorization of proposed fix.';
+    }
+
+    // Stage 5: Code Remediation (Patch application)
+    if (fixApplied && (!isAwaitingFirstApproval || isHumanApproved)) {
+        stages[idx.remediation].status = 'completed';
+        stages[idx.remediation].summary = 'Minimal secure code patch applied within approved file scope.';
+    }
+
+    // Stage 6: Bench Test & Re-Scan
     let benchPassed = false;
     if (validation || report.includes('## Unit Test Agent') || report.includes('Post-Fix Verification Tests') || report.includes('## Post-Fix Test Validation') || trace.includes('unit-test') || trace.includes('[TEST]') || trace.includes('[BENCH_TEST]')) {
         const valStatus = String(validation?.status || '').toUpperCase();
@@ -632,84 +759,117 @@ function inferStageStatuses(details) {
 
         if (isHardFailure) {
             benchPassed = false;
-            stages[4].status = 'failed';
+            stages[idx.benchTest].status = 'failed';
             const rootMsg = validation?.rootError || validation?.summary || `Stage failed (${cat || valStatus || 'FAILED'})`;
-            stages[4].summary = (cat === 'TESTS_FAILED' && countsKnown && testsTotal > 0)
+            stages[idx.benchTest].summary = (cat === 'TESTS_FAILED' && countsKnown && testsTotal > 0)
                 ? `Post-fix tests failed (${testsPassed} passed, ${testsFailed} failed). ${validation?.rootError ? validation.rootError : ''}`.trim()
                 : rootMsg;
         } else if (isNotExecuted) {
-            stages[4].status = 'pending';
-            stages[4].summary = validation?.rootError || validation?.summary || 'NOT EXECUTED — Required sandbox or test runtime unavailable.';
+            stages[idx.benchTest].status = 'pending';
+            stages[idx.benchTest].summary = validation?.rootError || validation?.summary || 'NOT EXECUTED — Required sandbox or test runtime unavailable.';
             benchPassed = false;
         } else {
             const exitZero = validation?.exitCode === 0 || validation?.buildResult === 'PASS' || valStatus === 'PASS';
             benchPassed = exitZero && testsFailed === 0 && testsTotal > 0;
 
-            stages[4].status = benchPassed ? 'completed' : 'failed';
-            stages[4].summary = benchPassed
+            stages[idx.benchTest].status = benchPassed ? 'completed' : 'failed';
+            stages[idx.benchTest].summary = benchPassed
                 ? `Targeted unit tests passed (${testsPassed} passed, ${testsFailed} failed).`
                 : (validation?.rootError || validation?.summary || (countsKnown ? `Targeted unit tests failed (${testsPassed} passed, ${testsFailed} failed).` : 'Post-fix verification did not pass.'));
         }
     }
 
-    // Propagate explicit failed/interrupted runState stage if no downstream stage already marked failed
-    if (details.runState && (details.runState.status === 'FAILED' || details.runState.status === 'INTERRUPTED')) {
+    // Propagate explicit failed/interrupted runState stage cleanly
+    if (details.runState && (details.runState.status === 'FAILED' || details.runState.status === 'INTERRUPTED' || details.runState.findingState === FINDING_STATE.VALIDATION_FAILED)) {
         const engineFailStage = Number(details.runState.failedStage || 0);
         const reasonText = details.runState.failureReason || details.runState.failureCategory || details.runState.status;
-        if (engineFailStage === 1) {
-            stages[0].status = 'failed';
-            stages[0].summary = `Classification failed: ${reasonText}`;
-        } else if (engineFailStage === 2) {
-            stages[1].status = 'failed';
-            stages[1].summary = `Code Analysis / RCA failed: ${reasonText}`;
-        } else if (engineFailStage === 3) {
-            stages[2].status = 'failed';
-            stages[2].summary = `Baseline testing failed/blocked: ${reasonText}`;
-        } else if (engineFailStage === 4) {
-            stages[3].status = 'failed';
-            stages[3].summary = `Human approval / patch proposal blocked: ${reasonText}`;
-        } else if (engineFailStage === 5) {
-            stages[2].status = 'failed';
-            stages[2].summary = `Isolated patch application failed: ${reasonText}`;
-        } else if (engineFailStage === 6 || engineFailStage === 7) {
-            stages[4].status = 'failed';
-            if (!stages[4].summary || stages[4].summary.includes('Create/update unit tests')) {
-                stages[4].summary = reasonText;
+        if (engineFailStage >= 1 && engineFailStage <= 9) {
+            const targetIdx = isLegacy7
+                ? Math.min(idx.closure, Math.max(0, engineFailStage - 1))
+                : engineFailStage - 1;
+            if (stages[targetIdx]) {
+                stages[targetIdx].status = 'failed';
+                if (!stages[targetIdx].summary || stages[targetIdx].summary.includes('Execute')) {
+                    stages[targetIdx].summary = reasonText;
+                }
             }
-        } else if (engineFailStage === 8) {
-            stages[5].status = 'failed';
-            stages[5].summary = `Final audit gate failed: ${reasonText}`;
         }
     }
 
-    // Stage 6: Final Human Approval Gate
+    // Stage 7: Security Review & Evidence (9-stage model)
+    if (!isLegacy7 && stages[idx.secReview]) {
+        if (securityReview) {
+            const revRating = String(securityReview.rating || securityReview.status || '').toUpperCase();
+            stages[idx.secReview].status = revRating === 'PASS' ? 'completed' : (revRating === 'FAIL' || revRating === 'BLOCKED' ? 'failed' : 'completed');
+            stages[idx.secReview].summary = securityReview.summary || `Security review outcome: ${revRating || 'Evaluated'}`;
+        } else if (stages[idx.benchTest].status === 'failed' || stages[idx.benchTest].status === 'completed') {
+            stages[idx.secReview].status = 'completed';
+            stages[idx.secReview].summary = benchPassed ? 'Security evidence review completed.' : 'Security review documented validation failure.';
+        }
+    }
+
+    // Stage 8: Final Human Approval Gate
     const hasFinalDoc = report.includes('## Documentation Agent') || report.includes('Final Status') || trace.includes('[DOCUMENTATION]') || trace.includes('[FINAL_GATE]');
-    const isFinalPass = securityReview?.rating === 'PASS' || (validation?.isValidationPassed === true && benchPassed);
+    const isFinalPass = (securityReview?.rating === 'PASS' || validation?.isValidationPassed === true) && benchPassed;
     const hasIntegrityTampering = details.integrityVerification?.status === 'TAMPERING_DETECTED';
     const hasBlockedInjection = details.injectionScreening?.outcome === SCREEN_OUTCOME.BLOCK ||
         details.injectionScreening?.outcome === SCREEN_OUTCOME.QUARANTINE;
 
     if (hasIntegrityTampering || hasBlockedInjection) {
-        stages[5].status = 'failed';
-        stages[5].summary = hasIntegrityTampering
+        if (stages[idx.benchTest]) {
+            stages[idx.benchTest].status = 'failed';
+            stages[idx.benchTest].summary = hasIntegrityTampering
+                ? 'Evidence Integrity Mismatch Detected — validation results cannot be trusted.'
+                : 'Blocked untrusted content injection detected in evidence.';
+        }
+        stages[idx.finalGate].status = 'failed';
+        stages[idx.finalGate].summary = hasIntegrityTampering
             ? 'Evidence Integrity Mismatch Detected — manual audit required before exit.'
             : 'Blocked untrusted content injection detected in evidence report.';
-    } else if (hasFinalDoc && isFinalPass) {
-        stages[5].status = 'completed';
-        stages[5].summary = 'Final governance approval granted. Ready for workflow exit.';
-    } else if (stages[4].status === 'completed') {
-        stages[5].status = 'awaiting_review';
-        stages[5].summary = 'Ready for final human sign-off before application team hand-off.';
+        details.securityValidationOutcome = VALIDATION_OUTCOME.FAILED;
+        details.approvalDecision = APPROVAL_DECISION.BLOCKED_STAGE8;
+        details.formalClosure = FORMAL_CLOSURE.VALIDATION_FAILED;
+        details.findingState = FINDING_STATE.VALIDATION_FAILED;
+    } else if (stages[idx.benchTest].status === 'failed' || details.runState?.approvalDecision === APPROVAL_DECISION.BLOCKED_STAGE8) {
+        // B5: Failed validation BLOCKS final human sign-off (never awaiting approval/resolved)
+        stages[idx.finalGate].status = 'blocked';
+        stages[idx.finalGate].summary = 'BLOCKED — Post-fix validation failed. Final sign-off is prohibited until validation passes.';
+        details.securityValidationOutcome = VALIDATION_OUTCOME.FAILED;
+        details.approvalDecision = APPROVAL_DECISION.BLOCKED_STAGE8;
+        details.formalClosure = FORMAL_CLOSURE.VALIDATION_FAILED;
+        details.findingState = FINDING_STATE.VALIDATION_FAILED;
+        details.workflowLifecycle = WORKFLOW_LIFECYCLE.COMPLETED;
+    } else if (hasFinalDoc && isFinalPass && details.runState?.status !== 'AWAITING_FINAL_APPROVAL') {
+        stages[idx.finalGate].status = 'completed';
+        stages[idx.finalGate].summary = 'Final governance approval granted. Ready for workflow exit.';
+        details.securityValidationOutcome = VALIDATION_OUTCOME.PASSED;
+        details.approvalDecision = APPROVAL_DECISION.APPROVED_STAGE8;
+        details.formalClosure = FORMAL_CLOSURE.RESOLVED_CLOSED;
+        details.findingState = FINDING_STATE.RESOLVED;
+        details.workflowLifecycle = WORKFLOW_LIFECYCLE.COMPLETED;
+    } else if (stages[idx.benchTest].status === 'completed' && benchPassed) {
+        stages[idx.finalGate].status = 'awaiting_review';
+        stages[idx.finalGate].summary = 'Ready for final human sign-off before application team hand-off.';
+        details.securityValidationOutcome = VALIDATION_OUTCOME.PASSED;
+        details.approvalDecision = APPROVAL_DECISION.PENDING_STAGE8;
+        details.formalClosure = FORMAL_CLOSURE.AWAITING_FINAL_SIGN_OFF;
+        details.findingState = FINDING_STATE.AWAITING_FINAL_SIGN_OFF;
     }
 
-    // Stage 7: Final Manual Validations (Non-Agentic App Team Hand-off)
-    if (stages[5].status === 'completed') {
-        stages[6].status = 'completed';
-        stages[6].summary = 'Handed off to Application Team for Regression Testing & CI/CD Deployment.';
-    } else if (stages[4].status === 'completed') {
-        stages[6].status = 'pending';
-        stages[6].summary = 'Pending final human gate approval before App Owner validation.';
+    // Stage 9: Workflow Closure
+    if (stages[idx.finalGate].status === 'completed') {
+        stages[idx.closure].status = 'completed';
+        stages[idx.closure].summary = 'Workflow concluded with verified remediation and formal sign-off.';
+    } else if (stages[idx.finalGate].status === 'blocked' || stages[idx.benchTest].status === 'failed') {
+        stages[idx.closure].status = 'failed';
+        stages[idx.closure].summary = 'Workflow Ended — Validation Failed (remediation incomplete; rework or retry required).';
+        details.workflowLifecycle = WORKFLOW_LIFECYCLE.COMPLETED;
+    } else if (stages[idx.benchTest].status === 'completed') {
+        stages[idx.closure].status = 'pending';
+        stages[idx.closure].summary = 'Pending final human sign-off before workflow closure.';
     }
+
+    details.terminalBanner = deriveTerminalBanner(details);
 }
 
 /**

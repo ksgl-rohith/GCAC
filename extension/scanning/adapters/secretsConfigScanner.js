@@ -128,9 +128,10 @@ class SecretsConfigScanner extends ScannerAdapter {
     }
 
     /**
-     * Recursively traverses target path respecting security boundaries and exclusions
+     * Recursively traverses target path respecting security boundaries and exclusions.
+     * Verifies directory canonical containment once per directory rather than per file.
      */
-    _collectFiles(dirPath, allowedRoots, collected = []) {
+    _collectFiles(dirPath, allowedRoots, collected = [], stats = { repositoryFileCount: 0, skippedIgnoredExt: 0 }) {
         const IGNORED_DIRS = new Set([
             '.git', '.vscode', '.agents', '.github', 'node_modules', 'bin', 'obj',
             'output', 'remediation-output', 'evidence', '.gcac', 'workspaces', 'TestResults', 'target'
@@ -142,23 +143,27 @@ class SecretsConfigScanner extends ScannerAdapter {
             '.md', '.txt', '.db', '.db-wal', '.db-shm', '.xlsx', '.xls', '.csv', '.pfx', '.pem', '.key', '.p12'
         ]);
 
+        const dirMatch = assertPathWithinAuthorizedRoots(dirPath, allowedRoots);
+        if (!dirMatch) return collected;
+        const canonicalDir = dirMatch.canonicalPath;
+
         try {
-            const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+            const entries = fs.readdirSync(canonicalDir, { withFileTypes: true });
             for (const entry of entries) {
                 if (entry.isSymbolicLink()) continue;
                 if (entry.name.startsWith('.') && entry.name !== '.env') continue;
+                const fullPath = path.join(canonicalDir, entry.name);
                 if (entry.isDirectory()) {
                     if (!IGNORED_DIRS.has(entry.name)) {
-                        this._collectFiles(path.join(dirPath, entry.name), allowedRoots, collected);
+                        this._collectFiles(fullPath, allowedRoots, collected, stats);
                     }
                 } else if (entry.isFile()) {
+                    stats.repositoryFileCount++;
                     const ext = path.extname(entry.name).toLowerCase();
                     if (!IGNORED_EXTENSIONS.has(ext) && entry.name !== 'packages.lock.json' && entry.name !== 'package-lock.json') {
-                        const fullPath = path.join(dirPath, entry.name);
-                        const safeMatch = assertPathWithinAuthorizedRoots(fullPath, allowedRoots);
-                        if (safeMatch) {
-                            collected.push(safeMatch.canonicalPath);
-                        }
+                        collected.push(fullPath);
+                    } else {
+                        stats.skippedIgnoredExt++;
                     }
                 }
             }
@@ -183,21 +188,26 @@ class SecretsConfigScanner extends ScannerAdapter {
         try {
             const stats = fs.statSync(filePath);
             if (!stats.isFile() || stats.size === 0) {
-                return { findings, skippedEmpty: true };
+                return { findings, skippedEmpty: true, skippedLarge: false };
             }
             if (stats.size > 2 * 1024 * 1024) {
-                return { findings, skippedEmpty: false };
+                return { findings, skippedEmpty: false, skippedLarge: true, fileSize: stats.size };
             }
             content = fs.readFileSync(filePath, 'utf-8');
         } catch (e) {
-            return { findings, skippedEmpty: false };
+            return { findings, skippedEmpty: false, skippedLarge: false };
         }
 
+        return this._scanFileContent(filePath, content, workspaceRoot, scanId, meta);
+    }
+
+    _scanFileContent(filePath, content, workspaceRoot, scanId, meta = {}) {
+        const findings = [];
         if (!content || !content.trim()) {
-            return { findings, skippedEmpty: true };
+            return { findings, skippedEmpty: true, skippedLarge: false };
         }
 
-        const effectiveRoot = meta.repositoryRoot || workspaceRoot;
+        const effectiveRoot = meta.canonicalEffectiveRoot || meta.repositoryRoot || workspaceRoot;
         const lines = content.split(/\r?\n/);
         let relPath = effectiveRoot
             ? path.relative(effectiveRoot, filePath).replace(/\\/g, '/')
@@ -280,13 +290,17 @@ class SecretsConfigScanner extends ScannerAdapter {
             }
         }
 
-        return { findings, skippedEmpty: false };
+        return { findings, skippedEmpty: false, skippedLarge: false };
     }
 
     async scan(workspaceRoot, targetPath, options = {}) {
         const scanId = options.scanId || `scan-${Date.now()}`;
+        const tTotal = process.hrtime.bigint();
         const startTime = Date.now();
+        this._cancelled = false;
         this.status = SCANNER_STATUS.RUNNING;
+        const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+        const abortSignal = options.abortSignal || null;
 
         const baseDir = targetPath || workspaceRoot;
         if (!baseDir || !fs.existsSync(baseDir)) {
@@ -299,7 +313,10 @@ class SecretsConfigScanner extends ScannerAdapter {
                 durationMs: Date.now() - startTime,
                 errors: [`Target path does not exist: '${baseDir}'.`],
                 warnings: [],
-                coverage: '0% (Target path missing)'
+                coverage: '0% (Target path missing)',
+                scannedFileCount: 0,
+                eligibleFileCount: 0,
+                repositoryFileCount: 0
             };
         }
 
@@ -311,20 +328,29 @@ class SecretsConfigScanner extends ScannerAdapter {
             ...(Array.isArray(options.authorizedRoots) ? options.authorizedRoots.map(r => canonicalizePath(r)) : [])
         ].filter(Boolean)));
 
+        const tDiscovery = process.hrtime.bigint();
         const stat = fs.statSync(baseDir);
+        const collectionStats = { repositoryFileCount: stat.isFile() ? 1 : 0, skippedIgnoredExt: 0 };
+        const canonicalBase = canonicalizePath(baseDir);
         const filesToScan = stat.isFile()
-            ? [canonicalizePath(baseDir)]
-            : this._collectFiles(canonicalizePath(baseDir), allowedRoots);
+            ? (assertPathWithinAuthorizedRoots(canonicalBase, allowedRoots) ? [canonicalBase] : [])
+            : this._collectFiles(canonicalBase, allowedRoots, [], collectionStats);
+        const discoveryMs = Number(process.hrtime.bigint() - tDiscovery) / 1e6;
 
         const allFindings = [];
         const errors = [];
         const warnings = [];
         let nonEmptyScanned = 0;
         let emptySkipped = 0;
+        let skippedLargeFiles = 0;
+        let fileReadNs = 0n;
+        let parseScanNs = 0n;
 
+        const canonicalEffectiveRoot = canonicalizePath(repoContext.repositoryRoot || (stat.isDirectory() ? baseDir : workspaceRoot) || workspaceRoot);
         const meta = {
             repository: repoContext.repository || '',
-            repositoryRoot: repoContext.repositoryRoot || (stat.isDirectory() ? canonicalizePath(baseDir) : ''),
+            repositoryRoot: repoContext.repositoryRoot || (stat.isDirectory() ? canonicalBase : ''),
+            canonicalEffectiveRoot,
             canonicalRepositoryId: repoContext.canonicalRepositoryId || '',
             applicationNumber: repoContext.applicationNumber || options.applicationId || '',
             applicationName: repoContext.applicationName || '',
@@ -332,18 +358,107 @@ class SecretsConfigScanner extends ScannerAdapter {
             technology: repoContext.detectedTechnology || ''
         };
 
-        for (const file of filesToScan) {
-            try {
-                const { findings: fileFindings, skippedEmpty } = this._scanFileDetailed(file, workspaceRoot, scanId, meta);
-                if (skippedEmpty) {
-                    emptySkipped++;
-                } else {
-                    nonEmptyScanned++;
-                    allFindings.push(...fileFindings);
+        const totalEligible = filesToScan.length;
+        const concurrency = Math.max(1, Math.min(16, options.concurrency || 16));
+        let cursor = 0;
+        let processedCount = 0;
+        let lastProgressAt = 0;
+        let cancelled = false;
+
+        const scanWorker = async () => {
+            while (cursor < filesToScan.length) {
+                if (this._cancelled || (abortSignal && abortSignal.aborted)) {
+                    cancelled = true;
+                    return;
                 }
-            } catch (err) {
-                warnings.push(`Could not scan ${path.basename(file)}: ${err.message}`);
+                const idx = cursor++;
+                const file = filesToScan[idx];
+                try {
+                    const tRead0 = process.hrtime.bigint();
+                    const fStat = await fs.promises.stat(file);
+                    if (!fStat.isFile() || fStat.size === 0) {
+                        fileReadNs += (process.hrtime.bigint() - tRead0);
+                        emptySkipped++;
+                    } else if (fStat.size > 2 * 1024 * 1024) {
+                        fileReadNs += (process.hrtime.bigint() - tRead0);
+                        skippedLargeFiles++;
+                        warnings.push(`Skipped oversized file (>2 MB): ${path.basename(file)}`);
+                    } else {
+                        const content = await fs.promises.readFile(file, 'utf8');
+                        fileReadNs += (process.hrtime.bigint() - tRead0);
+
+                        const tParse0 = process.hrtime.bigint();
+                        const { findings: fileFindings, skippedEmpty } = this._scanFileContent(file, content, workspaceRoot, scanId, meta);
+                        parseScanNs += (process.hrtime.bigint() - tParse0);
+
+                        if (skippedEmpty) {
+                            emptySkipped++;
+                        } else {
+                            nonEmptyScanned++;
+                            if (fileFindings.length > 0) {
+                                allFindings.push(...fileFindings);
+                            }
+                        }
+                    }
+                } catch (err) {
+                    warnings.push(`Could not scan ${path.basename(file)}: ${err.message}`);
+                }
+
+                processedCount++;
+                const nowMs = Date.now();
+                if (processedCount === totalEligible || (nowMs - lastProgressAt) >= 120) {
+                    lastProgressAt = nowMs;
+                    onProgress({
+                        type: 'SCANNER_FILE_PROGRESS',
+                        scanId,
+                        scannerId: this.id,
+                        currentOperation: 'Scanning source & configuration files',
+                        filesScanned: processedCount,
+                        totalEligibleFiles: totalEligible,
+                        findingsCount: allFindings.length,
+                        elapsedMs: nowMs - startTime
+                    });
+                }
             }
+        };
+
+        const workers = [];
+        const workerCount = Math.min(concurrency, Math.max(1, filesToScan.length));
+        for (let i = 0; i < workerCount; i++) {
+            workers.push(scanWorker());
+        }
+        await Promise.all(workers);
+
+        const totalMs = Number(process.hrtime.bigint() - tTotal) / 1e6;
+        const metrics = {
+            discoveryMs: Number(discoveryMs.toFixed(2)),
+            fileReadMs: Number((Number(fileReadNs) / 1e6).toFixed(2)),
+            parsingMs: Number((Number(parseScanNs) / 1e6).toFixed(2)),
+            totalMs: Number(totalMs.toFixed(2)),
+            repositoryFileCount: collectionStats.repositoryFileCount,
+            eligibleFileCount: totalEligible,
+            filesScanned: nonEmptyScanned,
+            emptySkipped,
+            skippedLargeFiles
+        };
+
+        if (cancelled || this._cancelled || (abortSignal && abortSignal.aborted)) {
+            this.status = SCANNER_STATUS.CANCELLED || 'Cancelled';
+            return {
+                scannerId: this.id,
+                status: SCANNER_STATUS.CANCELLED || 'Cancelled',
+                cancelled: true,
+                executionPolicy: 'READ_ONLY_STATIC_POLICY',
+                findings: allFindings,
+                durationMs: Date.now() - startTime,
+                errors: ['Secrets/Config scan cancelled by user.'],
+                warnings,
+                coverage: `Partial (${nonEmptyScanned}/${totalEligible} file(s) before cancellation)`,
+                scannedFileCount: nonEmptyScanned,
+                eligibleFileCount: totalEligible,
+                repositoryFileCount: collectionStats.repositoryFileCount,
+                metrics
+            };
         }
 
         if (nonEmptyScanned === 0) {
@@ -361,7 +476,11 @@ class SecretsConfigScanner extends ScannerAdapter {
                         ? `All ${emptySkipped} candidate file(s) were empty or whitespace-only.`
                         : 'No scannable non-empty source or configuration files found in target.'
                 ],
-                coverage: '0% (No non-empty scannable inputs)'
+                coverage: '0% (No non-empty scannable inputs)',
+                scannedFileCount: 0,
+                eligibleFileCount: totalEligible,
+                repositoryFileCount: collectionStats.repositoryFileCount,
+                metrics
             };
         }
 
@@ -375,7 +494,11 @@ class SecretsConfigScanner extends ScannerAdapter {
             durationMs: Date.now() - startTime,
             errors,
             warnings,
-            coverage: `100% (${nonEmptyScanned} non-empty file(s) scanned${emptySkipped > 0 ? `, ${emptySkipped} empty skipped` : ''})`
+            coverage: `100% (${nonEmptyScanned} non-empty file(s) scanned${emptySkipped > 0 ? `, ${emptySkipped} empty skipped` : ''})`,
+            scannedFileCount: nonEmptyScanned,
+            eligibleFileCount: totalEligible,
+            repositoryFileCount: collectionStats.repositoryFileCount,
+            metrics
         };
     }
 }

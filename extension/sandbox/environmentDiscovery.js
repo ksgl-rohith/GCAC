@@ -33,17 +33,68 @@ function safeExecProbe(bin, args = [], opts = {}) {
     }
 }
 
-function findExecutableOnPath(exeNames = [], extraPaths = []) {
-    const lookupTool = process.platform === 'win32' ? 'where' : 'which';
+const ENV_CACHE_TTL_MS = 15000;
+const HOST_PROBE_CACHE_TTL_MS = 30000;
+const _envCache = new Map();
+const _hostProbeCache = new Map();
+
+function clearEnvironmentCache() {
+    _envCache.clear();
+    _hostProbeCache.clear();
+}
+
+function isExecutableFile(filePath) {
+    try {
+        const st = fs.statSync(filePath);
+        if (!st.isFile()) return false;
+        if (process.platform !== 'win32') {
+            fs.accessSync(filePath, fs.constants.X_OK);
+        }
+        return true;
+    } catch {
+        return false;
+    }
+}
+
+function findExecutableOnPath(exeNames = [], extraPaths = [], opts = {}) {
+    const pathEnv = process.env.PATH || '';
+    const pathDirs = pathEnv ? pathEnv.split(path.delimiter).filter(Boolean) : [];
+    const winExts = process.platform === 'win32'
+        ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';').filter(Boolean)
+        : [''];
+
+    // Fast in-process PATH lookup avoids spawning which/where per probe
     for (const exe of exeNames) {
-        const res = safeExecProbe(lookupTool, [exe], { timeoutMs: 2500 });
-        if (res.ok && res.stdout) {
-            const first = res.stdout.split(/\r?\n/)[0].trim();
-            if (first && fs.existsSync(first)) return first;
+        if (!exe || typeof exe !== 'string') continue;
+        if (path.isAbsolute(exe) && isExecutableFile(exe)) {
+            return exe;
+        }
+        const candidates = process.platform === 'win32' && !path.extname(exe)
+            ? winExts.map(ext => `${exe}${ext}`)
+            : [exe];
+        for (const dir of pathDirs) {
+            for (const name of candidates) {
+                const candidate = path.join(dir, name);
+                if (isExecutableFile(candidate)) {
+                    return candidate;
+                }
+            }
         }
     }
+
     for (const candidate of extraPaths) {
-        if (candidate && fs.existsSync(candidate)) return candidate;
+        if (candidate && isExecutableFile(candidate)) return candidate;
+    }
+
+    if (opts.useWhichFallback) {
+        const lookupTool = process.platform === 'win32' ? 'where' : 'which';
+        for (const exe of exeNames) {
+            const res = safeExecProbe(lookupTool, [exe], { timeoutMs: 2500 });
+            if (res.ok && res.stdout) {
+                const first = res.stdout.split(/\r?\n/)[0].trim();
+                if (first && fs.existsSync(first)) return first;
+            }
+        }
     }
     return null;
 }
@@ -405,6 +456,26 @@ function discoverEnvironment(workspaceRootOrOptions = {}, maybeOptions = {}) {
         : (workspaceRootOrOptions || {});
 
     const workspaceRoot = options.workspaceRoot || null;
+    const platform = options.platform || process.platform;
+    const arch = options.arch || process.arch;
+    const canUseCache = Boolean(
+        options.useCache === true &&
+        !options.forceRefresh &&
+        !options.probeFn &&
+        !options.execProbe &&
+        !options.pathFinder
+    );
+    const cacheKey = canUseCache
+        ? `${workspaceRoot || ''}::${platform}::${arch}::${process.env.PATH || ''}`
+        : null;
+
+    if (cacheKey) {
+        const cached = _envCache.get(cacheKey);
+        if (cached && (Date.now() - cached.storedAt) < (options.cacheTtlMs || ENV_CACHE_TTL_MS)) {
+            return cached.report;
+        }
+    }
+
     const execProbe = options.execProbe || options.probeFn || safeExecProbe;
     const pathFinder = options.pathFinder || (options.probeFn
         ? (names) => {
@@ -412,17 +483,32 @@ function discoverEnvironment(workspaceRootOrOptions = {}, maybeOptions = {}) {
             return (!probeCheck || probeCheck.notFound) ? null : names[0];
         }
         : findExecutableOnPath);
-    const platform = options.platform || process.platform;
-    const arch = options.arch || process.arch;
 
-    const docker = probeDocker(execProbe, pathFinder);
-    const podman = probePodman(execProbe, pathFinder);
-    const wsl = platform === 'win32' ? probeWsl(execProbe) : { applicable: false, installed: false, reason: 'Non-Windows host' };
+    const hostKey = canUseCache ? `${platform}::${arch}::${process.env.PATH || ''}` : null;
+    const cachedHost = hostKey ? _hostProbeCache.get(hostKey) : null;
+    const useCachedHost = Boolean(cachedHost && (Date.now() - cachedHost.storedAt) < (options.cacheTtlMs || HOST_PROBE_CACHE_TTL_MS));
+
+    const docker = useCachedHost ? cachedHost.docker : probeDocker(execProbe, pathFinder);
+    const podman = useCachedHost ? cachedHost.podman : probePodman(execProbe, pathFinder);
+    const wsl = useCachedHost
+        ? cachedHost.wsl
+        : (platform === 'win32' ? probeWsl(execProbe) : { applicable: false, installed: false, reason: 'Non-Windows host' });
     const dotnet = probeDotnet(execProbe, pathFinder, workspaceRoot);
-    const javaMaven = probeJavaAndMaven(execProbe, pathFinder);
-    const nodeGit = probeNodeAndGit(execProbe, pathFinder);
+    const javaMaven = useCachedHost ? cachedHost.javaMaven : probeJavaAndMaven(execProbe, pathFinder);
+    const nodeGit = useCachedHost ? cachedHost.nodeGit : probeNodeAndGit(execProbe, pathFinder);
     const scanners = probeScannersAndSbom(execProbe, pathFinder, workspaceRoot);
     const workspace = inspectWorkspaceToolchainsAndConfigs(workspaceRoot);
+
+    if (hostKey && !useCachedHost) {
+        _hostProbeCache.set(hostKey, {
+            storedAt: Date.now(),
+            docker,
+            podman,
+            wsl,
+            javaMaven,
+            nodeGit
+        });
+    }
 
     const dockerReady = docker.installed && docker.daemonReachable && docker.linuxContainerMode;
     const podmanReady = podman.installed && podman.daemonReachable && podman.linuxContainerMode;
@@ -455,7 +541,7 @@ function discoverEnvironment(workspaceRootOrOptions = {}, maybeOptions = {}) {
             ]
         };
 
-    return {
+    const report = {
         discoveredAt: new Date().toISOString(),
         os: {
             platform,
@@ -498,12 +584,26 @@ function discoverEnvironment(workspaceRootOrOptions = {}, maybeOptions = {}) {
         prerequisites,
         boundaryDisclosure
     };
+
+    if (cacheKey) {
+        _envCache.set(cacheKey, { report, storedAt: Date.now() });
+    }
+    return report;
+}
+
+function discoverEnvironmentCached(workspaceRootOrOptions = {}, maybeOptions = {}) {
+    const options = typeof workspaceRootOrOptions === 'string'
+        ? { workspaceRoot: workspaceRootOrOptions, ...(maybeOptions || {}), useCache: true }
+        : { ...(workspaceRootOrOptions || {}), useCache: true };
+    return discoverEnvironment(options);
 }
 
 module.exports = {
     SANDBOX_READINESS,
     safeExecProbe,
     findExecutableOnPath,
-    discoverEnvironment
+    discoverEnvironment,
+    discoverEnvironmentCached,
+    clearEnvironmentCache
 };
 

@@ -89,7 +89,10 @@ class DotnetSecurityScanner extends ScannerAdapter {
             };
         }
 
-        const envReport = discoverEnvironment(options?.workspaceRoot || process.cwd());
+        const envReport = options?.envReport || discoverEnvironment({
+            workspaceRoot: options?.workspaceRoot || process.cwd(),
+            useCache: true
+        });
         if (envReport.sandboxAvailable) {
             return {
                 available: true,
@@ -237,6 +240,8 @@ class DotnetSecurityScanner extends ScannerAdapter {
     async scan(workspaceRoot, targetPath, options = {}) {
         const scanId = options.scanId || `scan-${Date.now()}`;
         const startTime = Date.now();
+        const tTotal = process.hrtime.bigint();
+        this._cancelled = false;
 
         const projectDir = targetPath || workspaceRoot;
         if (!projectDir || !fs.existsSync(projectDir)) {
@@ -252,9 +257,11 @@ class DotnetSecurityScanner extends ScannerAdapter {
             };
         }
 
+        const tDisc0 = process.hrtime.bigint();
         const repoContext = options.repoContext || {};
         const boundaryRoot = repoContext.repositoryRoot || workspaceRoot;
         const projectFile = resolveDotnetProjectFile(boundaryRoot, projectDir);
+        const discoveryMs = Number(process.hrtime.bigint() - tDisc0) / 1e6;
 
         if (!projectFile) {
             return {
@@ -266,15 +273,24 @@ class DotnetSecurityScanner extends ScannerAdapter {
                 durationMs: Date.now() - startTime,
                 errors: [],
                 warnings: ['No .NET solution (.sln) or project (.csproj) found in target path.'],
-                coverage: '0% (No .NET project detected)'
+                coverage: '0% (No .NET project detected)',
+                metrics: {
+                    discoveryMs: Number(discoveryMs.toFixed(2)),
+                    externalProcessMs: 0,
+                    parsingMs: 0,
+                    totalMs: Number((Number(process.hrtime.bigint() - tTotal) / 1e6).toFixed(2))
+                }
             };
         }
 
         const projectDirRoot = path.dirname(projectFile);
+        const envReport = options.envReport || (!options.executionGateway && !options.sandboxBackend
+            ? discoverEnvironment({ workspaceRoot, useCache: true })
+            : null);
         const gateway = options.executionGateway || new TrustedExecutionGateway({
             workspaceRoot,
             backend: options.sandboxBackend || null,
-            envReport: options.envReport || null,
+            envReport,
             profilesPath: options.profilesPath
         });
 

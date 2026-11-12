@@ -1669,7 +1669,8 @@ body.theme-dark .nav-item.active svg {
     border: 1px solid rgba(37, 99, 235, 0.25);
 }
 
-.badge-status-inprogress {
+.badge-status-inprogress,
+.badge-status-active {
     background-color: var(--info-subtle);
     color: var(--info);
     border: 1px solid var(--info-border);
@@ -1687,7 +1688,8 @@ body.theme-dark .nav-item.active svg {
     border: 1px solid var(--border-subtle);
 }
 
-.badge-status-failed {
+.badge-status-failed,
+.badge-status-blocked {
     background-color: var(--danger-subtle);
     color: var(--danger);
     border: 1px solid var(--danger-border);
@@ -1926,7 +1928,8 @@ body.theme-dark .nav-item.active svg {
     background-color: var(--success-border);
 }
 
-.step-item.in_progress .step-number {
+.step-item.in_progress .step-number,
+.step-item.active .step-number {
     background-color: var(--accent-subtle);
     border-color: var(--accent);
     color: var(--accent);
@@ -1939,7 +1942,8 @@ body.theme-dark .nav-item.active svg {
     color: var(--warning);
 }
 
-.step-item.failed .step-number {
+.step-item.failed .step-number,
+.step-item.blocked .step-number {
     background-color: var(--danger-subtle);
     border-color: var(--danger);
     color: var(--danger);
@@ -3106,6 +3110,112 @@ body.theme-dark .nav-item.active svg {
     background: var(--btn-primary-bg);
     transition: width 0.3s ease;
     border-radius: var(--radius-pill);
+}
+
+.scan-progress-bar-fill.scan-progress-indeterminate {
+    width: 38%;
+    animation: gcacIndeterminateSlide 1.3s infinite ease-in-out;
+}
+
+@keyframes gcacIndeterminateSlide {
+    0% { transform: translateX(-100%); }
+    50% { transform: translateX(120%); }
+    100% { transform: translateX(260%); }
+}
+
+.scan-progress-meta {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+}
+
+.scan-mode-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+    padding-bottom: 10px;
+    border-bottom: 1px solid var(--border-subtle);
+}
+
+.evidence-checklist-card {
+    background: var(--bg-surface);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-md);
+    padding: 12px 14px;
+    margin-top: 10px;
+}
+
+.checklist-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.checklist-row {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 6px 8px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface-subtle);
+}
+
+.checklist-badge {
+    font-size: 10px;
+    font-weight: 700;
+    padding: 2px 7px;
+    border-radius: var(--radius-pill);
+    min-width: 64px;
+    text-align: center;
+    flex-shrink: 0;
+}
+
+.checklist-badge-pass {
+    background: var(--success-subtle);
+    color: var(--success);
+    border: 1px solid var(--success-border);
+}
+
+.checklist-badge-fail {
+    background: var(--danger-subtle);
+    color: var(--danger);
+    border: 1px solid var(--danger-border);
+}
+
+.checklist-badge-missing {
+    background: var(--warning-subtle);
+    color: var(--warning);
+    border: 1px solid var(--warning-border);
+}
+
+.secret-actions-callout {
+    margin-top: 10px;
+    padding: 10px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--warning-subtle);
+    border-left: 3px solid var(--warning);
+    font-size: 12px;
+}
+
+.secret-actions-list {
+    margin: 4px 0 0 18px;
+    padding: 0;
+}
+
+.scan-mode-disclosure {
+    margin-bottom: 10px;
+    padding: 8px 12px;
+    border-radius: var(--radius-sm);
+    background: var(--bg-surface-subtle);
+    border-left: 3px solid var(--warning, #d97706);
+    font-size: 12px;
+    color: var(--text-secondary);
 }
 
 /* Scanners Cards Grid */

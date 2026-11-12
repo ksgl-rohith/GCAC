@@ -1,6 +1,6 @@
 /**
  * GCAC Vulnerability Remediation Hub — Modern Enterprise SaaS Controller
- * Minimal • SaaS Aesthetic • Local-First • 7-Stage Governance
+ * Minimal • SaaS Aesthetic • Local-First • 9-Stage Governance
  */
 (function () {
     // --------------------------------------------------------------------------
@@ -98,34 +98,63 @@
         if (!data || typeof data !== 'object') return null;
         const evt = (data.event && typeof data.event === 'object') ? data.event : data;
 
-        let percent = evt.percent;
-        if (percent === undefined || percent === null) {
-            if (typeof evt.totalScanners === 'number' && evt.totalScanners > 0 && typeof evt.progressIndex === 'number') {
-                percent = Math.round((evt.progressIndex / evt.totalScanners) * 100);
-            } else if (evt.type === 'SCAN_FINISHED') {
-                percent = 100;
-            } else if (evt.type === 'SCAN_STARTED') {
-                percent = 5;
-            }
-        }
-        if (typeof percent === 'number') {
-            percent = Math.min(100, Math.max(5, percent));
+        let percent = null;
+        let indeterminate = Boolean(evt.indeterminate);
+        if (evt.percent !== undefined && evt.percent !== null && typeof evt.percent === 'number') {
+            percent = Math.min(100, Math.max(0, evt.percent));
+        } else if (typeof evt.filesScanned === 'number' && typeof evt.totalEligibleFiles === 'number' && evt.totalEligibleFiles > 0) {
+            percent = Math.min(100, Math.max(0, Math.round((evt.filesScanned / evt.totalEligibleFiles) * 100)));
+            indeterminate = false;
+        } else if (evt.type === 'SCAN_FINISHED' || evt.type === 'SCAN_CANCELLED') {
+            percent = 100;
+            indeterminate = false;
+        } else if (typeof evt.totalScanners === 'number' && evt.totalScanners > 0 && typeof evt.progressIndex === 'number' && evt.type === 'SCANNER_COMPLETE') {
+            percent = Math.min(100, Math.max(0, Math.round((evt.progressIndex / evt.totalScanners) * 100)));
+            indeterminate = false;
+        } else {
+            indeterminate = true;
         }
 
         let message = evt.message;
+        const scannerLabel = evt.scannerName || evt.scannerId || 'scanner';
         if (!message) {
             if (evt.type === 'SCAN_STARTED') {
-                message = 'Starting local security scan...';
+                message = `Starting ${evt.scanMode === 'quick' ? 'Quick' : 'Comprehensive'} Scan...`;
             } else if (evt.type === 'SCANNER_START') {
-                message = `Running ${evt.scannerName || evt.scannerId || 'scanner'}...`;
+                message = `Running ${scannerLabel}${evt.currentOperation ? ` — ${evt.currentOperation}` : ''}...`;
+            } else if (evt.type === 'SCANNER_FILE_PROGRESS') {
+                const fileNote = (typeof evt.filesScanned === 'number' && typeof evt.totalEligibleFiles === 'number')
+                    ? ` (${evt.filesScanned}/${evt.totalEligibleFiles} files)`
+                    : '';
+                message = `${scannerLabel}: ${evt.currentOperation || 'Analyzing'}${fileNote}`;
             } else if (evt.type === 'SCANNER_COMPLETE') {
-                message = `Completed ${evt.scannerName || evt.scannerId || 'scanner'} (${evt.findingsCount ?? 0} findings)`;
+                const cacheNote = evt.fromCache ? ' [Cached — Hash Verified]' : ' [Fresh]';
+                message = `Completed ${scannerLabel}${cacheNote}: ${evt.findingsCount ?? 0} finding(s)`;
+            } else if (evt.type === 'SCANNER_FAILED') {
+                message = `${scannerLabel} failed: ${evt.error || 'Execution error'}`;
+            } else if (evt.type === 'SCANNER_CANCELLED' || evt.type === 'SCAN_CANCELLED') {
+                message = `Scan cancelled${evt.scannerName ? ` during ${evt.scannerName}` : ''}`;
             } else if (evt.type === 'SCAN_FINISHED') {
-                message = `Scan complete (${evt.findingsCount ?? 0} total findings)`;
+                const count = evt.findingsSummary ? evt.findingsSummary.total : (evt.findingsCount ?? 0);
+                message = `Scan finished (${evt.status || 'Completed'}): ${count} total finding(s)`;
             }
         }
 
-        return { percent, message };
+        return {
+            percent,
+            indeterminate,
+            message,
+            scannerId: evt.scannerId || null,
+            scannerName: scannerLabel,
+            currentOperation: evt.currentOperation || '',
+            filesScanned: evt.filesScanned,
+            totalEligibleFiles: evt.totalEligibleFiles,
+            findingsCount: evt.findingsCount,
+            fromCache: Boolean(evt.fromCache),
+            timedOut: Boolean(evt.timedOut),
+            timeoutReason: evt.timeoutReason || '',
+            elapsedMs: evt.elapsedMs
+        };
     }
 
     function formatScanHistoryEntry(item) {
@@ -216,8 +245,8 @@
         const testsSkipped = val?.testsSkipped ?? 0;
         const testsTotal = val?.testsTotal ?? (testsPassed + testsFailed + testsSkipped);
         const buildPass = (statusLabel === 'PASS' || machineStatus === 'PASSED') && !isNotExecuted && testsFailed === 0 && testsTotal > 0;
+        const checklist = sec?.evidenceChecklist || null;
         const duration = val?.durationMs ? `${(val.durationMs / 1000).toFixed(2)}s` : 'N/A';
-        const score = sec?.score ?? val?.confidenceScore ?? 0;
 
         return {
             statusLabel,
@@ -231,7 +260,8 @@
             testsSkipped,
             testsTotal,
             duration,
-            score,
+            completionSummary: checklist ? checklist.completionSummary : null,
+            finalReviewStatus: checklist ? checklist.finalReviewStatus : (sec?.finalReviewStatus || null),
             sandboxStatus: val?.sandboxStatus || currentSbx?.sandboxStatus || 'SANDBOX UNAVAILABLE',
             backendType: val?.backendType || currentSbx?.backendType || 'NONE',
             profileId: val?.toolchainProfileId || 'Unresolved',
@@ -305,7 +335,7 @@
         },
         'active-runs': {
             title: 'Active Remediation Pipeline',
-            sub: 'Real-time status of 7-stage autonomous execution & verification.'
+            sub: 'Real-time canonical status of 9-stage governed execution & verification.'
         },
         'review-queue': {
             title: 'Human Review Queue',
@@ -349,7 +379,6 @@
     const themeDropdown = document.getElementById('themeDropdown');
     const themeCurrentIcon = document.getElementById('themeCurrentIcon');
     const themeCurrentLabel = document.getElementById('themeCurrentLabel');
-    const btnHeaderQuickRun = document.getElementById('btnHeaderQuickRun');
 
     // DOM Elements - Target Context
     const displayRepoName = document.getElementById('displayRepoName');
@@ -434,13 +463,13 @@
     const btnMapFindingRepository = document.getElementById('btnMapFindingRepository');
 
     const btnLaunchCopilot = document.getElementById('btnLaunchCopilot');
-    const btnRunRemediation = document.getElementById('btnRunRemediation');
-    const btnRunRemediationText = document.getElementById('btnRunRemediationText');
     const btnOpenLocation = document.getElementById('btnOpenLocation');
     const btnViewCodeModal = document.getElementById('btnViewCodeModal');
 
     const pipelineStepper = document.getElementById('pipelineStepper');
     const pipelineOverallStatus = document.getElementById('pipelineOverallStatus');
+    const btnSyncRunState = document.getElementById('btnSyncRunState');
+    const copilotHandoffBanner = document.getElementById('copilotHandoffBanner');
 
     const humanGateCard = document.getElementById('humanGateCard');
     const btnApprove = document.getElementById('btnApprove');
@@ -523,7 +552,11 @@
     const scanProgressText = document.getElementById('scanProgressText');
     const scanProgressTimer = document.getElementById('scanProgressTimer');
     const scanProgressBarFill = document.getElementById('scanProgressBarFill');
+    const scanProgressMeta = document.getElementById('scanProgressMeta');
     const scannersCardsGrid = document.getElementById('scannersCardsGrid');
+    const selectScanMode = document.getElementById('selectScanMode');
+    const chkBypassScanCache = document.getElementById('chkBypassScanCache');
+    const scanModeDisclosure = document.getElementById('scanModeDisclosure');
     const chkScanSecrets = document.getElementById('chkScanSecrets');
     const chkScanDotnet = document.getElementById('chkScanDotnet');
     const chkScanNuget = document.getElementById('chkScanNuget');
@@ -778,20 +811,6 @@
             });
         }
 
-        // Header Quick Run CTA
-        if (btnHeaderQuickRun) {
-            btnHeaderQuickRun.addEventListener('click', () => {
-                if (selectedVulnerability) {
-                    startRemediation(selectedVulnerability.Vulnerability_ID);
-                } else if (allVulnerabilities.length > 0) {
-                    const firstTarget = allVulnerabilities.find(v => (v.Severity || '').toUpperCase() === 'CRITICAL') || allVulnerabilities[0];
-                    switchView('vulnerabilities');
-                    selectVulnerability(firstTarget, true);
-                    startRemediation(firstTarget.Vulnerability_ID);
-                }
-            });
-        }
-
         // Header Scan CTA
         if (btnHeaderScan) {
             btnHeaderScan.addEventListener('click', () => {
@@ -871,6 +890,21 @@
         }
 
         // Scans View Execution Controls
+        if (selectScanMode) {
+            selectScanMode.addEventListener('change', () => {
+                const isQuick = selectScanMode.value === 'quick';
+                if (chkScanSecrets) chkScanSecrets.checked = true;
+                if (chkScanDotnet) chkScanDotnet.checked = !isQuick;
+                if (chkScanNuget) chkScanNuget.checked = !isQuick;
+                if (chkScanCodeql) chkScanCodeql.checked = !isQuick;
+                if (scanModeDisclosure) {
+                    scanModeDisclosure.textContent = isQuick
+                        ? 'Quick Scan runs only local Secrets & Config checks (secrets-config). .NET Roslyn SAST, NuGet SCA Audit, and CodeQL semantic analysis are omitted — not equivalent to a Comprehensive Scan.'
+                        : 'Comprehensive Scan runs all selected SAST, SCA, secrets/configuration, and optional CodeQL analyzers (CodeQL runs only when installed).';
+                }
+            });
+        }
+
         if (btnStartScan) {
             btnStartScan.addEventListener('click', () => {
                 triggerScanExecution();
@@ -964,6 +998,16 @@
             });
         });
 
+        if (btnSyncRunState) {
+            btnSyncRunState.addEventListener('click', () => {
+                if (selectedVulnerability) {
+                    postToHost({ command: 'syncRunState', vulnerabilityId: selectedVulnerability.Vulnerability_ID });
+                } else {
+                    postToHost({ command: 'refresh' });
+                }
+            });
+        }
+
         // Table Search & Select Filters
         if (tableSearchInput) {
             tableSearchInput.addEventListener('input', () => {
@@ -1019,13 +1063,6 @@
                     title: selectedVulnerability.Title,
                     repository: selectedVulnerability.Repository
                 });
-            });
-        }
-
-        if (btnRunRemediation) {
-            btnRunRemediation.addEventListener('click', () => {
-                if (!selectedVulnerability || isRemediating) return;
-                startRemediation(selectedVulnerability.Vulnerability_ID);
             });
         }
 
@@ -1345,8 +1382,24 @@
                     if (currentDetails && currentDetails.vulnerabilityId) {
                         detailsCache.set(currentDetails.vulnerabilityId, currentDetails);
                     }
+                    if (!currentDetails || currentDetails.workflowLifecycle !== 'IN_PROGRESS') {
+                        isRemediating = false;
+                    }
                     renderInspectorDetails(currentDetails);
                     renderDashboardMetrics();
+                    break;
+
+                case 'RETRY_UNAVAILABLE':
+                    isRemediating = false;
+                    if (currentDetails && (!message.vulnerabilityId || currentDetails.vulnerabilityId === message.vulnerabilityId)) {
+                        if (message.eligibility) {
+                            currentDetails.retryEligibility = message.eligibility;
+                        }
+                        renderInspectorDetails(currentDetails);
+                    }
+                    if (message.reason) {
+                        showToast(message.reason, 'warning');
+                    }
                     break;
 
                 case 'REPORTS_LOADED':
@@ -1373,6 +1426,13 @@
                     break;
 
                 case 'COPILOT_LAUNCHED':
+                    if (currentDetails && (!message.vulnerabilityId || currentDetails.vulnerabilityId === message.vulnerabilityId)) {
+                        if (message.workflowLifecycle) currentDetails.workflowLifecycle = message.workflowLifecycle;
+                        if (message.findingState) currentDetails.findingState = message.findingState;
+                        if (message.handoffState) currentDetails.handoff = message.handoffState;
+                        if (message.runId && !currentDetails.runId) currentDetails.runId = message.runId;
+                        renderInspectorDetails(currentDetails);
+                    }
                     openCopilotModal(message.prompt, message.manualSubmissionRequired !== false);
                     break;
 
@@ -1384,7 +1444,6 @@
                     isRemediating = false;
                     if (headerRunIndicator) headerRunIndicator.style.display = 'none';
                     if (navActiveRunPulse) navActiveRunPulse.style.display = 'none';
-                    if (btnRunRemediationText) btnRunRemediationText.textContent = 'Execute Engine';
                     if (currentDetails) renderInspectorDetails(currentDetails);
                     showToast(message.error || 'Remediation pipeline error', 'error');
                     break;
@@ -1419,6 +1478,10 @@
 
                 case 'SCAN_COMPLETED':
                     handleScanCompleted(message);
+                    break;
+
+                case 'SCAN_CANCELLED':
+                    handleScanCancelled(message);
                     break;
 
                 case 'SCAN_ERROR':
@@ -1498,44 +1561,83 @@
     }
 
     // --------------------------------------------------------------------------
-    // Live Remediation Execution Tracking
+    // Live Remediation Execution Tracking (Sourced strictly from Extension / Copilot Events)
     // --------------------------------------------------------------------------
-    function startRemediation(vulnerabilityId) {
-        isRemediating = true;
-        if (btnRetryStage) btnRetryStage.disabled = true;
-        if (btnReviseFix) btnReviseFix.disabled = true;
 
-        // Update header & buttons
-        if (headerRunIndicator) headerRunIndicator.style.display = 'flex';
-        if (headerRunText) headerRunText.textContent = `Remediating ${vulnerabilityId}...`;
-        if (navActiveRunPulse) navActiveRunPulse.style.display = 'block';
-
-        if (btnRunRemediationText) btnRunRemediationText.textContent = 'Executing...';
-
-        // Update active run view
-        const target = allVulnerabilities.find(v => v.Vulnerability_ID === vulnerabilityId);
-        if (target) updateActiveRunView(target);
-
-        // Switch to terminal tab in inspector
-        switchEvidenceTab('trace');
-        appendTerminalLog('DISCOVERY', `Initiating 7-stage autonomous pipeline for ${vulnerabilityId}...`);
-
-        postToHost({ command: 'runRemediation', vulnerabilityId });
+    function resolveEventStageIndex(evt) {
+        if (!currentDetails || !Array.isArray(currentDetails.stages)) return -1;
+        if (evt.stageId) {
+            const byId = currentDetails.stages.findIndex(s => s.id === evt.stageId);
+            if (byId >= 0) return byId;
+        }
+        if (typeof evt.stageNumber === 'number') {
+            const byNum = currentDetails.stages.findIndex(s => Number(s.stageNumber || s.number) === evt.stageNumber);
+            if (byNum >= 0) return byNum;
+            if (evt.stageNumber >= 1 && evt.stageNumber <= currentDetails.stages.length) {
+                return evt.stageNumber - 1;
+            }
+        }
+        return -1;
     }
 
     function handleRemediationProgress(evt) {
         if (!evt) return;
 
+        // Protect against cross-finding or stale sequence events overwriting newer UI state
+        if (evt.findingId && selectedVulnerability && evt.findingId !== selectedVulnerability.Vulnerability_ID) {
+            return;
+        }
+        if (currentDetails && currentDetails.runId && evt.runId && evt.runId !== currentDetails.runId && evt.type !== 'RUN_STARTED') {
+            return;
+        }
+        if (currentDetails && evt.attemptNumber && currentDetails.attemptNumber && evt.attemptNumber < currentDetails.attemptNumber) {
+            return;
+        }
+        if (currentDetails && evt.seq && currentDetails.lastAppliedSeq && evt.seq <= currentDetails.lastAppliedSeq && evt.attemptNumber === currentDetails.attemptNumber) {
+            return;
+        }
+        if (currentDetails && evt.seq) {
+            currentDetails.lastAppliedSeq = evt.seq;
+        }
+        if (currentDetails && Array.isArray(evt.stages) && evt.stages.length === (currentDetails.stages?.length || 0)) {
+            currentDetails.stages = evt.stages.map((s, idx) => ({ ...(currentDetails.stages[idx] || {}), ...s }));
+        }
+
+        const idx = resolveEventStageIndex(evt);
+
         switch (evt.type) {
+            case 'RUN_STARTED':
+                if (currentDetails && evt.runId) currentDetails.runId = evt.runId;
+                if (idx >= 0) setStageStatus(idx, 'in_progress', evt.summary || 'Run started...');
+                if (headerRunIndicator) headerRunIndicator.style.display = 'flex';
+                if (headerRunText) headerRunText.textContent = `Run ${evt.runId ? evt.runId.slice(0, 8) : ''} Active`;
+                break;
+
+            case 'RETRY_STARTED':
+                isRemediating = true;
+                if (headerRunIndicator) headerRunIndicator.style.display = 'flex';
+                if (headerRunText) headerRunText.textContent = `Retry Attempt #${evt.attemptNumber || '?'} (Stage ${evt.stageNumber || ''})`;
+                if (activeRunSummaryStage) activeRunSummaryStage.textContent = `Retrying Stage ${evt.stageNumber || ''}`;
+                if (btnRetryStage) btnRetryStage.disabled = true;
+                if (btnReviseFix) btnReviseFix.disabled = true;
+                appendTerminalLog('RETRY', evt.summary || `Retry attempt #${evt.attemptNumber} started.`);
+                break;
+
+            case 'RETRY_REJECTED':
+                isRemediating = false;
+                if (currentDetails) renderInspectorDetails(currentDetails);
+                showToast(evt.summary || 'Retry unavailable for current state.', 'warning');
+                break;
+
             case 'STAGE_START':
-                setStageStatus(evt.stageNumber - 1, 'in_progress', `Stage ${evt.stageNumber} executing...`);
+                if (idx >= 0) setStageStatus(idx, 'active', evt.summary || `Stage ${evt.stageNumber} executing...`);
+                if (headerRunIndicator) headerRunIndicator.style.display = 'flex';
                 if (headerRunText) headerRunText.textContent = `Stage ${evt.stageNumber} Active (${evt.stageId})`;
-                if (btnRunRemediationText) btnRunRemediationText.textContent = `Stage ${evt.stageNumber}...`;
                 if (activeRunSummaryStage) activeRunSummaryStage.textContent = `Stage ${evt.stageNumber} (${evt.stageId})`;
                 break;
 
             case 'STAGE_COMPLETE':
-                setStageStatus(evt.stageNumber - 1, 'completed', evt.summary);
+                if (idx >= 0) setStageStatus(idx, 'completed', evt.summary);
                 if (evt.patchDiff && currentDetails) {
                     currentDetails.patchDiff = evt.patchDiff;
                     renderDiffView(evt.patchDiff);
@@ -1552,6 +1654,35 @@
                 }
                 break;
 
+            case 'STAGE_FAILED':
+                if (idx >= 0) setStageStatus(idx, 'failed', evt.summary || evt.failureCategory || 'Stage validation failed.');
+                if (evt.validation && currentDetails) {
+                    currentDetails.validation = evt.validation;
+                    renderTestEvidenceView(currentDetails);
+                }
+                if (headerRunText) headerRunText.textContent = `Stage ${evt.stageNumber} Failed (${evt.failureCategory || 'FAILED'})`;
+                if (activeRunSummaryStage) activeRunSummaryStage.textContent = `Stage ${evt.stageNumber} Failed`;
+                break;
+
+            case 'STAGE_BLOCKED':
+            case 'FINAL_GATE_BLOCKED':
+                isRemediating = false;
+                if (idx >= 0) setStageStatus(idx, 'blocked', evt.summary || 'Gate blocked — post-fix validation failed.');
+                if (finalGateCard) finalGateCard.style.display = 'none';
+                if (headerRunIndicator) headerRunIndicator.style.display = 'none';
+                if (navActiveRunPulse) navActiveRunPulse.style.display = 'none';
+                if (activeRunSummaryStage) activeRunSummaryStage.textContent = 'Stage 8 Blocked (Validation Failed)';
+                if (activeRunSummaryStatus) activeRunSummaryStatus.textContent = evt.validationOutcome || 'VALIDATION_FAILED';
+                if (currentDetails) {
+                    currentDetails.findingState = 'VALIDATION_FAILED';
+                    currentDetails.formalClosure = 'VALIDATION_FAILED';
+                    currentDetails.approvalDecision = 'BLOCKED_STAGE8';
+                    currentDetails.terminalBanner = 'Workflow Ended — Validation Failed';
+                    renderInspectorDetails(currentDetails);
+                }
+                showToast(evt.message || 'Final Sign-off Blocked: Post-fix validation failed.', 'error');
+                break;
+
             case 'LOG':
                 appendTerminalLog(evt.tag, evt.message);
                 break;
@@ -1559,10 +1690,9 @@
             case 'GATE_REQUIRED':
                 isRemediating = false;
                 if (headerRunIndicator) headerRunIndicator.style.display = 'flex';
-                if (headerRunText) headerRunText.textContent = 'Awaiting Gate 4 Approval';
-                if (btnRunRemediationText) btnRunRemediationText.textContent = 'Awaiting Gate 4';
+                if (headerRunText) headerRunText.textContent = 'Awaiting Stage 4 Approval';
                 if (activeRunSummaryStage) activeRunSummaryStage.textContent = 'Stage 4 (Human Review Gate)';
-                setStageStatus(3, 'awaiting_review', 'Paused at Stage 4: Human Review & Proposed Fix Authorization.');
+                setStageStatus(idx >= 0 ? idx : 3, 'awaiting_review', 'Paused at Stage 4: Human Review & Proposed Fix Authorization.');
                 if (humanGateCard) humanGateCard.style.display = 'flex';
                 if (gate4TrustMeta) {
                     const hashTxt = evt.proposedDiffSha256 ? escapeHtml(evt.proposedDiffSha256) : 'Pending SHA-256 calculation';
@@ -1579,40 +1709,51 @@
             case 'FINAL_GATE_REQUIRED':
                 isRemediating = false;
                 if (headerRunIndicator) headerRunIndicator.style.display = 'flex';
-                if (headerRunText) headerRunText.textContent = 'Awaiting Gate 6 Sign-off';
-                if (btnRunRemediationText) btnRunRemediationText.textContent = 'Awaiting Gate 6';
-                if (activeRunSummaryStage) activeRunSummaryStage.textContent = 'Stage 6 (Final Sign-off Gate)';
-                setStageStatus(5, 'awaiting_review', 'Paused at Stage 6: Final Human Approval Gate.');
+                if (headerRunText) headerRunText.textContent = 'Awaiting Stage 8 Sign-off';
+                if (activeRunSummaryStage) activeRunSummaryStage.textContent = 'Stage 8 (Final Sign-off Gate)';
+                setStageStatus(idx >= 0 ? idx : 7, 'awaiting_review', 'Paused at Stage 8: Final Human Sign-Off Gate.');
                 if (finalGateCard) finalGateCard.style.display = 'flex';
-                showToast(`Stage 6 Final Gate: Sign-off required for ${evt.vulnerabilityId}`, 'info');
+                showToast(`Stage 8 Final Gate: Sign-off required for ${evt.vulnerabilityId}`, 'info');
                 break;
 
-            case 'WORKFLOW_COMPLETE':
+            case 'WORKFLOW_CONCLUDED':
+            case 'WORKFLOW_COMPLETE': {
                 isRemediating = false;
                 if (headerRunIndicator) headerRunIndicator.style.display = 'none';
                 if (navActiveRunPulse) navActiveRunPulse.style.display = 'none';
-                if (btnRunRemediationText) btnRunRemediationText.textContent = '✓ Remediated';
-                if (activeRunSummaryStage) activeRunSummaryStage.textContent = 'Completed (Ready for CI/CD)';
-                if (activeRunSummaryStatus) activeRunSummaryStatus.textContent = 'Remediated';
-                setStageStatus(6, 'completed', 'Ready for Application Owner CI/CD Deployment.');
-                showToast(`Remediation pipeline completed for ${evt.vulnerabilityId}!`, 'success');
+                const resolvedOk = evt.isResolved === true && String(evt.validationOutcome || '').toUpperCase() === 'PASSED';
+                if (resolvedOk) {
+                    if (activeRunSummaryStage) activeRunSummaryStage.textContent = 'Completed (Verified & Signed Off)';
+                    if (activeRunSummaryStatus) activeRunSummaryStatus.textContent = 'Remediated';
+                    setStageStatus(idx >= 0 ? idx : 8, 'completed', 'Verified & Signed Off. Ready for Application Owner CI/CD.');
+                    showToast(`Remediation verified & signed off for ${evt.vulnerabilityId}.`, 'success');
+                } else {
+                    const bannerTxt = evt.terminalBanner || 'Workflow Ended — Validation Failed';
+                    if (activeRunSummaryStage) activeRunSummaryStage.textContent = bannerTxt;
+                    if (activeRunSummaryStatus) activeRunSummaryStatus.textContent = evt.validationOutcome || 'VALIDATION_FAILED';
+                    if (finalGateCard) finalGateCard.style.display = 'none';
+                    setStageStatus(idx >= 0 ? idx : 8, 'failed', bannerTxt);
+                    showToast(`${evt.vulnerabilityId}: ${bannerTxt}`, 'warning');
+                }
                 postToHost({ command: 'requestData' });
                 postToHost({ command: 'loadReports' });
                 if (selectedVulnerability) {
                     postToHost({ command: 'loadDetails', vulnerabilityId: selectedVulnerability.Vulnerability_ID });
                 }
                 break;
+            }
 
             case 'WORKFLOW_FAILED':
                 isRemediating = false;
                 if (headerRunIndicator) headerRunIndicator.style.display = 'none';
                 if (navActiveRunPulse) navActiveRunPulse.style.display = 'none';
-                if (btnRunRemediationText) btnRunRemediationText.textContent = 'Retry / Inspect';
                 if (activeRunSummaryStage) activeRunSummaryStage.textContent = evt.failedStage ? `Failed at Stage ${evt.failedStage}` : 'Failed';
                 if (activeRunSummaryStatus) activeRunSummaryStatus.textContent = evt.failureCategory || 'Failed';
-                if (evt.failedStage) {
-                    const uiStageIdx = evt.failedStage >= 6 ? 4 : Math.max(0, evt.failedStage - 1);
-                    setStageStatus(uiStageIdx, 'failed', evt.reason || evt.failureCategory || 'Execution failed.');
+                if (idx >= 0) {
+                    setStageStatus(idx, 'failed', evt.reason || evt.failureCategory || 'Execution failed.');
+                } else if (evt.failedStage && currentDetails?.stages) {
+                    const fallbackIdx = Math.min(currentDetails.stages.length - 1, Math.max(0, evt.failedStage - 1));
+                    setStageStatus(fallbackIdx, 'failed', evt.reason || evt.failureCategory || 'Execution failed.');
                 }
                 if (selectedVulnerability) {
                     postToHost({ command: 'loadDetails', vulnerabilityId: selectedVulnerability.Vulnerability_ID });
@@ -2419,12 +2560,6 @@
             }
         }
 
-        // Update Live Remediation button state
-        const isRemediated = (v.Remediation_Status || '').toLowerCase() === 'remediated';
-        if (btnRunRemediationText) {
-            btnRunRemediationText.textContent = isRemediated ? 'Re-run Engine' : 'Execute Engine';
-        }
-
         // Open Inspector Panel
         detailPanel.classList.add('visible');
         vulnWorkspaceLayout.classList.add('with-detail');
@@ -2443,7 +2578,7 @@
         if (activeRunVulnTitle) activeRunVulnTitle.textContent = `${v.Vulnerability_ID} — ${v.Title}`;
         if (activeRunVulnSubtitle) activeRunVulnSubtitle.textContent = `${v.Severity} Severity • ${v.Application_Name || ''} • ${v.Repository || ''}`;
         if (activeRunSummaryId) activeRunSummaryId.textContent = v.Vulnerability_ID;
-        if (activeRunSummaryStage) activeRunSummaryStage.textContent = isRemediating ? 'Executing 7-Stage Pipeline' : (v.Remediation_Status || 'Ready');
+        if (activeRunSummaryStage) activeRunSummaryStage.textContent = isRemediating ? 'Executing 9-Stage Pipeline' : (v.Remediation_Status || 'Ready');
         if (activeRunSummaryFiles) activeRunSummaryFiles.textContent = v.Files_Changed ? v.Files_Changed.split(';').length + ' File(s)' : (v.Location_Path ? '1 File' : '--');
         if (activeRunSummaryTests) activeRunSummaryTests.textContent = v.Test_Status || (v.Final_Validation_Status === 'PASS' ? 'PASS (1/1)' : 'Pending');
         const cached = detailsCache.get(v.Vulnerability_ID);
@@ -2528,41 +2663,72 @@
                 const status = stage.status || 'pending';
                 li.className = `step-item ${status}`;
 
-                let icon = stage.number || (idx + 1);
+                const stageNum = stage.stageNumber || stage.number || (idx + 1);
+                let icon = stageNum;
                 if (status === 'completed') icon = '✓';
-                if (status === 'failed') { icon = '✕'; hasFailure = true; allDone = false; }
-                if (status === 'awaiting_review') {
+                else if (status === 'failed') { icon = '✕'; hasFailure = true; allDone = false; }
+                else if (status === 'blocked') { icon = '!'; allDone = false; }
+                else if (status === 'awaiting_review') {
                     icon = '!';
                     allDone = false;
                     if (stage.id === 'human-gate') showGate4 = true;
                     if (stage.id === 'final-human-gate') showGate6 = true;
+                } else if (status === 'in_progress' || status === 'active' || status === 'pending') {
+                    allDone = false;
                 }
-                if (status === 'in_progress' || status === 'pending') allDone = false;
+
+                const rawName = String(stage.name || stage.label || `Stage ${stageNum}`);
+                const displayName = /^Stage\s+\d+/i.test(rawName) ? rawName : `Stage ${stageNum}: ${rawName}`;
+                const badgeLabel = status === 'blocked' ? 'BLOCKED' : (status === 'active' ? 'ACTIVE' : status.replace('_', ' ').toUpperCase());
 
                 li.innerHTML = `
                     <div class="step-number">${icon}</div>
                     <div class="step-content">
                         <div>
-                            <div class="step-name">${stage.number ? `Stage ${stage.number}: ` : ''}${escapeHtml(stage.name)}</div>
+                            <div class="step-name">${escapeHtml(displayName)}</div>
                             <div class="step-summary">${escapeHtml(stage.summary || 'Pending')}</div>
                         </div>
-                        <span class="badge badge-status-${status}">${status.replace('_', ' ').toUpperCase()}</span>
+                        <span class="badge badge-status-${status}">${badgeLabel}</span>
                     </div>
                 `;
                 pipelineStepper.appendChild(li);
             });
 
+            const valFailed = hasFailure || details.findingState === 'VALIDATION_FAILED' || details.findingState === 'COULD_NOT_RUN' ||
+                details.approvalDecision === 'BLOCKED_STAGE8' || details.securityValidationOutcome === 'FAILED';
+            if (valFailed) showGate6 = false;
+
+            if (copilotHandoffBanner) {
+                if (details.workflowLifecycle === 'HANDED_OFF_TO_COPILOT' || details.findingState === 'AWAITING_VERIFIED_RESULT') {
+                    copilotHandoffBanner.className = 'scan-coverage-banner u-mb-8';
+                    copilotHandoffBanner.textContent = details.handoff?.note ||
+                        'HANDED_OFF_TO_COPILOT / AWAITING_VERIFIED_RESULT: Copilot Chat opened. Run @vulnerability-orchestrator in Copilot Chat, then click Sync Status if needed.';
+                } else if (details.terminalBanner && valFailed) {
+                    copilotHandoffBanner.className = 'scan-coverage-banner error u-mb-8';
+                    copilotHandoffBanner.textContent = details.terminalBanner;
+                } else {
+                    copilotHandoffBanner.className = 'scan-coverage-banner u-hidden u-mb-8';
+                    copilotHandoffBanner.textContent = '';
+                }
+            }
+
             // Overall status badge
             if (pipelineOverallStatus) {
-                if (allDone) {
+                if (details.workflowLifecycle === 'HANDED_OFF_TO_COPILOT' || details.findingState === 'AWAITING_VERIFIED_RESULT') {
+                    pipelineOverallStatus.textContent = 'Awaiting Verified Result';
+                    pipelineOverallStatus.className = 'badge badge-status-review';
+                } else if (valFailed) {
+                    pipelineOverallStatus.textContent = details.findingState === 'COULD_NOT_RUN' ? 'Could Not Run' : 'Validation Failed';
+                    pipelineOverallStatus.className = 'badge badge-status-failed';
+                } else if (allDone && details.formalClosure === 'RESOLVED_CLOSED') {
                     pipelineOverallStatus.textContent = 'Remediated';
                     pipelineOverallStatus.className = 'badge badge-status-remediated';
                 } else if (showGate4 || showGate6) {
                     pipelineOverallStatus.textContent = 'Awaiting Gate';
                     pipelineOverallStatus.className = 'badge badge-status-review';
-                } else if (hasFailure) {
-                    pipelineOverallStatus.textContent = 'Failed';
-                    pipelineOverallStatus.className = 'badge badge-status-failed';
+                } else if (allDone) {
+                    pipelineOverallStatus.textContent = 'Concluded';
+                    pipelineOverallStatus.className = 'badge badge-status-pending';
                 } else {
                     pipelineOverallStatus.textContent = 'Ready';
                     pipelineOverallStatus.className = 'badge badge-status-pending';
@@ -2729,10 +2895,41 @@
         const depText = primaryVal?.dependencyStatus || sbx?.dependencyStatus || summary.dependencyStatus;
 
         const statusColorClass = summary.buildPass ? 'u-text-success' : (summary.isNotExecuted ? 'u-text-warning' : 'u-text-danger');
-        const scoreTextClass = summary.score >= 90 ? 'u-text-success' : (summary.score >= 70 ? 'u-text-warning' : 'u-text-danger');
-        const scoreBgClass = summary.score >= 90 ? 'legend-bg-success' : (summary.score >= 70 ? 'legend-bg-warning' : 'legend-bg-danger');
+        const checklist = details.evidenceChecklist || sec?.evidenceChecklist || null;
         const countsUnavailable = summary.isNotExecuted || !summary.countsKnown;
         const exitCodeDisplay = (primaryVal?.exitCode !== null && primaryVal?.exitCode !== undefined) ? String(primaryVal.exitCode) : 'N/A';
+
+        const recClass = checklist?.recommendation === 'READY_FOR_REVIEW'
+            ? 'badge-success'
+            : (checklist?.recommendation === 'REVIEW_REQUIRED' ? 'badge-warning' : 'badge-status-failed');
+
+        const checklistRowsHtml = checklist && Array.isArray(checklist.checks)
+            ? checklist.checks
+                .filter(c => c.status !== 'NOT_APPLICABLE')
+                .map(c => {
+                    const bClass = c.status === 'PASS' ? 'checklist-badge-pass' : (c.status === 'FAIL' ? 'checklist-badge-fail' : 'checklist-badge-missing');
+                    return `
+                        <div class="checklist-row">
+                            <span class="checklist-badge ${bClass}">${escapeHtml(c.status)}</span>
+                            <div class="checklist-text">
+                                <div class="u-fw-600">${escapeHtml(c.label)}</div>
+                                <div class="u-font-11 u-text-secondary">${escapeHtml(c.detail)}</div>
+                            </div>
+                        </div>
+                    `;
+                }).join('')
+            : '';
+
+        const secretActionsHtml = (checklist?.isSecretFinding && Array.isArray(checklist.secretRemediationActions) && checklist.secretRemediationActions.length > 0)
+            ? `
+                <div class="secret-actions-callout">
+                    <div class="u-fw-700 u-mb-4">Required Manual Secret Remediation Controls</div>
+                    <ul class="secret-actions-list">
+                        ${checklist.secretRemediationActions.map(a => `<li><strong>${escapeHtml(a.id)}:</strong> ${escapeHtml(a.action)}</li>`).join('')}
+                    </ul>
+                </div>
+            `
+            : '';
 
         valContent.innerHTML = `
             <div class="evidence-dashboard">
@@ -2771,14 +2968,17 @@
                     <div><strong>Network Policy:</strong> <code>${escapeHtml(networkText)}</code> | <strong>Dependency Policy:</strong> <code>${escapeHtml(depText)}</code>${sbom ? ` | <strong>SBOM:</strong> <code>${escapeHtml(sbom.format || 'CycloneDX/1.5')}</code> (${escapeHtml(sbom.sbomStatus || 'NOT_AVAILABLE')})` : ''}</div>
                 </div>
 
-                <div class="score-meter-wrap">
-                    <div class="score-meter-label">
-                        <span class="u-fw-600">Autonomous Validation Confidence Score</span>
-                        <span class="u-fw-700 ${scoreTextClass}">${summary.score} / 100</span>
+                <div class="evidence-checklist-card">
+                    <div class="u-flex-between u-mb-8">
+                        <div>
+                            <div class="u-fw-700">Evidence Verification Checklist</div>
+                            <div class="u-font-11 u-text-secondary">${escapeHtml(checklist ? checklist.completionSummary : 'Checklist will compute once validation artifacts are collected')}</div>
+                        </div>
+                        <span class="badge ${recClass}">${escapeHtml(checklist ? checklist.recommendation : (sec?.rating || 'UNVERIFIED'))}</span>
                     </div>
-                    <div class="score-bar-bg">
-                        <div class="score-bar-fill ${scoreBgClass}" data-bar-width="${summary.score}%"></div>
-                    </div>
+                    ${checklist?.finalReviewStatus ? `<div class="u-font-12 u-fw-600 u-mb-8">${escapeHtml(checklist.finalReviewStatus)}</div>` : ''}
+                    <div class="checklist-rows">${checklistRowsHtml || '<div class="u-font-12 u-text-muted">No verification checks executed yet.</div>'}</div>
+                    ${secretActionsHtml}
                 </div>
 
                 ${(details.remediationDecision || details.sourceToSinkEvidence || details.integrityVerification?.status === 'TAMPERING_DETECTED') ? `
@@ -2997,13 +3197,23 @@
             return;
         }
 
+        const scanMode = selectScanMode ? selectScanMode.value : 'comprehensive';
+        const bypassCache = Boolean(chkBypassScanCache && chkBypassScanCache.checked);
         const chosenTarget = (inputScanTargetPath ? inputScanTargetPath.value.trim() : '') || currentConfig.activeRepo;
 
         if (btnStartScan) btnStartScan.disabled = true;
         if (btnCancelScan) btnCancelScan.style.display = 'inline-flex';
         if (scanProgressCard) scanProgressCard.style.display = 'block';
-        if (scanProgressBarFill) scanProgressBarFill.style.width = '5%';
-        if (scanProgressText) scanProgressText.textContent = `Starting scan on ${chosenTarget || 'workspace'}...`;
+        if (scanProgressBarFill) {
+            scanProgressBarFill.style.width = '';
+            scanProgressBarFill.classList.add('scan-progress-indeterminate');
+        }
+        if (scanProgressText) {
+            scanProgressText.textContent = `Initializing ${scanMode === 'quick' ? 'Quick' : 'Comprehensive'} Scan on ${chosenTarget || 'workspace'}...`;
+        }
+        if (scanProgressMeta) {
+            scanProgressMeta.textContent = `Adapters queued: ${scannerIds.length} | Cache: ${bypassCache ? 'Bypassed' : 'Input-Hash Verified'}`;
+        }
 
         scanStartTime = Date.now();
         if (scanTimerInterval) clearInterval(scanTimerInterval);
@@ -3015,6 +3225,8 @@
         postToHost({
             command: 'scanRepository',
             scannerIds: scannerIds,
+            scanMode,
+            bypassCache,
             targetRepo: chosenTarget
         });
     }
@@ -3023,11 +3235,31 @@
         const normalized = normalizeScanProgressEvent(data);
         if (!normalized) return;
         if (scanProgressCard) scanProgressCard.style.display = 'block';
-        if (normalized.percent !== undefined && scanProgressBarFill) {
-            scanProgressBarFill.style.width = `${normalized.percent}%`;
+        if (scanProgressBarFill) {
+            if (normalized.indeterminate || normalized.percent === null) {
+                scanProgressBarFill.style.width = '';
+                scanProgressBarFill.classList.add('scan-progress-indeterminate');
+            } else {
+                scanProgressBarFill.classList.remove('scan-progress-indeterminate');
+                scanProgressBarFill.style.width = `${normalized.percent}%`;
+            }
         }
         if (normalized.message && scanProgressText) {
             scanProgressText.textContent = normalized.message;
+        }
+        if (scanProgressMeta) {
+            const metaParts = [];
+            if (normalized.scannerName && normalized.scannerName !== 'scanner') metaParts.push(`Scanner: ${normalized.scannerName}`);
+            if (normalized.currentOperation) metaParts.push(`Operation: ${normalized.currentOperation}`);
+            if (typeof normalized.filesScanned === 'number') {
+                metaParts.push(typeof normalized.totalEligibleFiles === 'number'
+                    ? `Files: ${normalized.filesScanned}/${normalized.totalEligibleFiles}`
+                    : `Files: ${normalized.filesScanned}`);
+            }
+            if (typeof normalized.findingsCount === 'number') metaParts.push(`Findings: ${normalized.findingsCount}`);
+            if (normalized.fromCache) metaParts.push('Source: Cached (Hash Verified)');
+            if (normalized.timeoutReason) metaParts.push(`Timeout: ${normalized.timeoutReason}`);
+            scanProgressMeta.textContent = metaParts.join(' | ');
         }
     }
 
@@ -3038,25 +3270,42 @@
         }
         if (btnStartScan) btnStartScan.disabled = false;
         if (btnCancelScan) btnCancelScan.style.display = 'none';
-        if (scanProgressBarFill) scanProgressBarFill.style.width = '100%';
-        const count = data.findingsCount !== undefined ? data.findingsCount : (data.result?.findingsSummary?.total || 0);
-        if (scanProgressText) scanProgressText.textContent = `Scan complete: ${count} finding(s) discovered`;
+        if (scanProgressBarFill) {
+            scanProgressBarFill.classList.remove('scan-progress-indeterminate');
+            scanProgressBarFill.style.width = '100%';
+        }
+        const resObj = data.result || {};
+        const count = data.findingsCount !== undefined ? data.findingsCount : (resObj.findingsSummary?.total || 0);
+        const scanStatus = data.status || resObj.status || 'Completed';
+        const cacheInfo = (data.cacheHits || resObj.cacheHits) ? ` | Cached adapters: ${data.cacheHits || resObj.cacheHits}` : '';
+        const modeLabel = (data.scanMode || resObj.scanMode) === 'quick' ? 'Quick Scan' : 'Comprehensive Scan';
+        if (scanProgressText) {
+            scanProgressText.textContent = `${modeLabel} ${scanStatus}: ${count} finding(s) discovered${cacheInfo}`;
+        }
+        if (scanProgressMeta) {
+            const durSec = resObj.durationMs ? `${(resObj.durationMs / 1000).toFixed(2)}s` : (scanProgressTimer ? scanProgressTimer.textContent : '');
+            scanProgressMeta.textContent = `${data.coverageDisclosure || resObj.coverageDisclosure || ''} ${durSec ? `(${durSec})` : ''}`.trim();
+        }
 
         setTimeout(() => {
             if (scanProgressCard) scanProgressCard.style.display = 'none';
-        }, 3000);
+        }, 4000);
 
-        const resObj = data.result || {};
-        const scanStatus = data.status || resObj.status || 'Completed';
         const unverified = Boolean(data.unverifiedCoverage || resObj.unverifiedCoverage || (resObj.errors && resObj.errors.length > 0));
         if (scanCoverageBanner) {
-            if (scanStatus === 'No Scannable Inputs' || scanStatus === 'Unsupported Repository') {
+            if (data.cancelled || resObj.cancelled || scanStatus === 'Cancelled') {
+                scanCoverageBanner.className = 'scan-coverage-banner warning';
+                scanCoverageBanner.textContent = 'Scan cancelled before completion. Partial results excluded from full-coverage baseline.';
+            } else if (scanStatus === 'No Scannable Inputs' || scanStatus === 'Unsupported Repository') {
                 scanCoverageBanner.className = 'scan-coverage-banner';
                 scanCoverageBanner.textContent = `${scanStatus}: ${resObj.unsupportedReason || 'Target repository contains no supported non-empty source files or manifests. Zero synthetic findings generated.'}`;
             } else if (unverified) {
                 scanCoverageBanner.className = 'scan-coverage-banner error';
-                const errMsgs = (resObj.errors || []).map(e => `${e.scannerId}: ${e.message}`).join(' | ');
-                scanCoverageBanner.textContent = `Incomplete Scan Coverage (${scanStatus}): ${errMsgs || 'One or more scanners failed; 0 findings cannot be treated as clean.'}`;
+                const errMsgs = (resObj.errors || []).map(e => typeof e === 'string' ? e : `${e.scannerId}: ${e.message}`).join(' | ');
+                scanCoverageBanner.textContent = `Incomplete Scan Coverage (${scanStatus}): ${errMsgs || 'One or more scanners failed or timed out; 0 findings cannot be treated as clean.'}`;
+            } else if ((data.scanMode || resObj.scanMode) === 'quick') {
+                scanCoverageBanner.className = 'scan-coverage-banner';
+                scanCoverageBanner.textContent = data.coverageDisclosure || resObj.coverageDisclosure || 'Quick Scan completed with limited scope.';
             } else {
                 scanCoverageBanner.className = 'scan-coverage-banner u-hidden';
                 scanCoverageBanner.textContent = '';
@@ -3064,9 +3313,25 @@
         }
 
         const toastSeverity = unverified ? 'warning' : (scanStatus === 'No Scannable Inputs' ? 'info' : 'success');
-        showToast(`Scan finished (${scanStatus}): ${count} finding(s) discovered`, toastSeverity);
+        showToast(`${modeLabel} finished (${scanStatus}): ${count} finding(s) discovered`, toastSeverity);
         postToHost({ command: 'getScanHistory' });
         postToHost({ command: 'requestData' });
+    }
+
+    function handleScanCancelled() {
+        if (scanTimerInterval) {
+            clearInterval(scanTimerInterval);
+            scanTimerInterval = null;
+        }
+        if (btnStartScan) btnStartScan.disabled = false;
+        if (btnCancelScan) btnCancelScan.style.display = 'none';
+        if (scanProgressBarFill) {
+            scanProgressBarFill.classList.remove('scan-progress-indeterminate');
+            scanProgressBarFill.style.width = '';
+        }
+        if (scanProgressText) scanProgressText.textContent = 'Scan cancelled; child processes terminated.';
+        if (scanProgressMeta) scanProgressMeta.textContent = 'Coverage incomplete due to cancellation.';
+        showToast('Vulnerability scan cancelled.', 'warning');
     }
 
     function handleScanError(data) {
@@ -3076,6 +3341,9 @@
         }
         if (btnStartScan) btnStartScan.disabled = false;
         if (btnCancelScan) btnCancelScan.style.display = 'none';
+        if (scanProgressBarFill) {
+            scanProgressBarFill.classList.remove('scan-progress-indeterminate');
+        }
         if (scanProgressCard) scanProgressCard.style.display = 'none';
         showToast(data.error || 'Vulnerability scan failed', 'error');
     }
@@ -3275,9 +3543,9 @@
         const toast = document.createElement('div');
         toast.className = `toast ${status}`;
 
-        let icon = 'ℹ️';
+        let icon = '[i]';
         if (status === 'success') icon = '✓';
-        if (status === 'warning') icon = '⚠️';
+        if (status === 'warning') icon = '[!]';
         if (status === 'error') icon = '✕';
 
         toast.innerHTML = `

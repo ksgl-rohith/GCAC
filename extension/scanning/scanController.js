@@ -6,6 +6,8 @@ const { SecretsConfigScanner } = require('./adapters/secretsConfigScanner');
 const { CodeQLScanner } = require('./adapters/codeqlScanner');
 const { FindingsStore } = require('./findingsStore');
 const { SCANNER_STATUS } = require('./findingModel');
+const { ScanCache, computeInputFingerprint, stableHashObject } = require('./scanCache');
+const { discoverEnvironment } = require('../sandbox/environmentDiscovery');
 const {
     canonicalizePath,
     assertPathWithinAuthorizedRoots,
@@ -20,9 +22,16 @@ const {
     SCREEN_OUTCOME
 } = require('../contentInjectionScreen');
 
+const QUICK_MODE_SCANNERS = Object.freeze(['secrets-config']);
+
+function elapsedMsSince(startNs) {
+    return Number((Number(process.hrtime.bigint() - startNs) / 1e6).toFixed(2));
+}
+
 /**
  * Scan Controller for GCAC Vulnerability Remediation Hub
  * Coordinates discovery, configuration validation, execution, timeouts, cancellation,
+ * incremental key-bound caching, monotonic performance instrumentation,
  * repository-scoped provenance, and progress reporting across approved local scanners.
  */
 class ScanController {
@@ -30,6 +39,11 @@ class ScanController {
         this.workspaceRoot = workspaceRoot;
         this.extensionRoot = options.extensionRoot || path.resolve(__dirname, '../..');
         this.findingsStore = options.findingsStore || new FindingsStore(workspaceRoot);
+        this.enableCache = options.enableCache !== false;
+        this.scanCache = options.scanCache || new ScanCache(
+            this.findingsStore?.storageDir || path.join(workspaceRoot, 'output', 'scans'),
+            options.cacheOptions || {}
+        );
         this.isWorkspaceTrusted = options.isWorkspaceTrusted !== undefined ? options.isWorkspaceTrusted : true;
         this.executionGateway = options.executionGateway || null;
         this.sandboxBackend = options.sandboxBackend || null;
@@ -47,11 +61,13 @@ class ScanController {
         this.registerScanner(new DotnetSecurityScanner());
         this.registerScanner(new NuGetAuditScanner());
         this.registerScanner(new SecretsConfigScanner());
-        this.registerScanner(new CodeQLScanner());
+        this.registerScanner(new CodeQLScanner({ workspaceRoot, extensionRoot: this.extensionRoot }));
 
         this.isScanning = false;
         this.currentScanId = null;
         this.currentCancelToken = null;
+        this.currentAbortController = null;
+        this._cancelRequestedAtNs = null;
     }
 
     setAuthorizedRoots(roots = []) {
@@ -89,19 +105,24 @@ class ScanController {
         this.isWorkspaceTrusted = !!trusted;
     }
 
-    async getAvailableScanners(targetWorkspaceRoot = null) {
+    async getAvailableScanners(targetWorkspaceRoot = null, options = {}) {
         const result = [];
         const seen = new Set();
         const effectiveWs = targetWorkspaceRoot || this.workspaceRoot;
+        const sharedEnvReport = options.envReport || this.envReport || discoverEnvironment({
+            workspaceRoot: effectiveWs,
+            useCache: options.forceRefresh !== true
+        });
         for (const scanner of this.scanners.values()) {
             if (seen.has(scanner.id)) continue;
             seen.add(scanner.id);
             try {
                 const avail = await scanner.isAvailable({
                     workspaceRoot: effectiveWs,
+                    extensionRoot: this.extensionRoot,
                     executionGateway: this.executionGateway,
                     sandboxBackend: this.sandboxBackend,
-                    envReport: this.envReport
+                    envReport: sharedEnvReport
                 });
                 result.push({
                     id: scanner.id,
@@ -191,8 +212,30 @@ class ScanController {
         const scanId = `SCAN-${Date.now()}`;
         this.isScanning = true;
         this.currentScanId = scanId;
+        this.currentAbortController = new AbortController();
+        this._cancelRequestedAtNs = null;
+        const abortSignal = this.currentAbortController.signal;
+
+        const tTotalNs = process.hrtime.bigint();
         const startTime = Date.now();
-        const onProgress = typeof scanRequest.onProgress === 'function' ? scanRequest.onProgress : () => { };
+        const rawOnProgress = typeof scanRequest.onProgress === 'function' ? scanRequest.onProgress : () => { };
+        let uiProgressEmitCount = 0;
+        let uiUpdateNs = 0n;
+        const emitProgress = (evt) => {
+            const tUi0 = process.hrtime.bigint();
+            uiProgressEmitCount++;
+            try {
+                rawOnProgress({
+                    ...evt,
+                    elapsedMs: evt.elapsedMs !== undefined ? evt.elapsedMs : Math.round(elapsedMsSince(tTotalNs))
+                });
+            } finally {
+                uiUpdateNs += (process.hrtime.bigint() - tUi0);
+            }
+        };
+
+        const rawMode = String(scanRequest.mode || scanRequest.scanMode || 'comprehensive').trim().toLowerCase();
+        const scanMode = rawMode === 'quick' ? 'quick' : 'comprehensive';
 
         try {
             const allAllowedRoots = Array.from(new Set([
@@ -214,10 +257,15 @@ class ScanController {
                 throw new Error(`Scan target does not exist on disk: '${targetFullPath}'.`);
             }
 
+            const tDisc0 = process.hrtime.bigint();
             const repoContext = this._resolveRepoContext(targetFullPath, scanRequest);
-            const selectedIds = Array.isArray(scanRequest.scannerIds) && scanRequest.scannerIds.length > 0
+            const tDiscRepoMs = elapsedMsSince(tDisc0);
+
+            const allRegisteredIds = Array.from(new Set(Array.from(this.scanners.values()).map(s => s.id)));
+            const hasExplicitSelection = Array.isArray(scanRequest.scannerIds) && scanRequest.scannerIds.length > 0;
+            const selectedIds = hasExplicitSelection
                 ? scanRequest.scannerIds
-                : Array.from(new Set(Array.from(this.scanners.values()).map(s => s.id)));
+                : (scanMode === 'quick' ? QUICK_MODE_SCANNERS.filter(id => this.scanners.has(id)) : allRegisteredIds);
 
             const activeAdapters = [];
             const seenAdapters = new Set();
@@ -231,13 +279,25 @@ class ScanController {
                 }
             }
 
-            onProgress({
+            const omittedScanners = allRegisteredIds.filter(id => !seenAdapters.has(id));
+            const coverageDisclosure = scanMode === 'quick'
+                ? `Quick Scan covers fast local secrets and configuration checks only (${activeAdapters.map(a => a.id).join(', ')}). Omitted analyzers (${omittedScanners.join(', ') || 'none'}): not equivalent to a comprehensive security assessment.`
+                : (seenAdapters.has('codeql')
+                    ? 'Comprehensive Scan includes all selected SAST, SCA, secrets/configuration, and optional CodeQL semantic analyzers.'
+                    : `Comprehensive Scan executed with explicitly selected analyzers (${activeAdapters.map(a => a.id).join(', ')}); omitted: ${omittedScanners.join(', ') || 'none'}.`);
+
+            emitProgress({
                 type: 'SCAN_STARTED',
                 scanId,
+                scanMode,
+                coverageDisclosure,
+                omittedScanners,
                 targetPath: targetFullPath,
                 repositoryRoot: repoContext.repositoryRoot,
                 applicationNumber: repoContext.applicationNumber,
-                totalScanners: activeAdapters.length
+                totalScanners: activeAdapters.length,
+                indeterminate: true,
+                currentOperation: 'Initializing repository inspection'
             });
 
             const builtinScannerIds = new Set([
@@ -263,17 +323,40 @@ class ScanController {
                     durationMs: 0,
                     errors: [],
                     warnings: [warnMsg],
-                    coverage: `0% (${reasonCode})`
+                    coverage: `0% (${reasonCode})`,
+                    fromCache: false
                 }));
 
+                const tPersist0 = process.hrtime.bigint();
                 const ingestStats = this.findingsStore.ingestScanFindings([], scanId, {
                     canonicalRepositoryId: repoContext.canonicalRepositoryId,
                     repositoryRoot: repoContext.repositoryRoot,
                     fullScanCompleted: true
                 });
 
+                const metrics = {
+                    environmentProbeMs: 0,
+                    discoveryMs: tDiscRepoMs,
+                    cacheLookupMs: 0,
+                    normalizationMs: 0,
+                    persistenceMs: 0,
+                    uiUpdateMs: Number((Number(uiUpdateNs) / 1e6).toFixed(2)),
+                    uiProgressEmitCount,
+                    cancellationMs: 0,
+                    totalMs: elapsedMsSince(tTotalNs),
+                    repositoryFileCount: repoContext.inspection?.sourceCounts?.totalFiles || 0,
+                    eligibleFileCount: repoContext.inspection?.sourceCounts?.nonEmptyFiles || 0,
+                    filesScanned: 0,
+                    cacheHits: 0,
+                    cacheMisses: 0,
+                    scannerTimings: {}
+                };
+
                 const sessionRecord = {
                     scanId,
+                    scanMode,
+                    coverageDisclosure,
+                    omittedScanners,
                     timestamp: new Date().toISOString(),
                     targetPath: repoContext.repository || targetFullPath,
                     repositoryRoot: repoContext.repositoryRoot,
@@ -284,23 +367,30 @@ class ScanController {
                     reasonCode,
                     noScannableInputs: true,
                     scannersCount: activeAdapters.length,
-                    scannerSummary: scannerResults.map(r => ({ id: r.scannerId, status: r.status, coverage: r.coverage })),
+                    scannerSummary: scannerResults.map(r => ({ id: r.scannerId, status: r.status, coverage: r.coverage, fromCache: false })),
                     findingsSummary: emptySummary,
-                    ingestStats
+                    ingestStats,
+                    metrics
                 };
                 this.findingsStore.recordScanSession(sessionRecord);
+                metrics.persistenceMs = elapsedMsSince(tPersist0);
 
-                onProgress({
+                emitProgress({
                     type: 'SCAN_FINISHED',
                     scanId,
+                    scanMode,
                     status: 'No Scannable Inputs',
                     reasonCode,
                     durationMs,
-                    findingsSummary: emptySummary
+                    findingsSummary: emptySummary,
+                    indeterminate: false
                 });
 
                 return {
                     scanId,
+                    scanMode,
+                    coverageDisclosure,
+                    omittedScanners,
                     status: 'No Scannable Inputs',
                     reasonCode,
                     noScannableInputs: true,
@@ -313,43 +403,181 @@ class ScanController {
                     newFindings: [],
                     errors: [],
                     warnings: [warnMsg],
-                    repoContext
+                    repoContext,
+                    metrics
                 };
             }
 
+            const needsSandboxEnv = activeAdapters.some(a => a.id === 'dotnet-security' || a.id === 'nuget-audit');
+            const tEnv0 = process.hrtime.bigint();
+            const sharedEnvReport = scanRequest.envReport || this.envReport || (needsSandboxEnv
+                ? discoverEnvironment({
+                    workspaceRoot: targetFullPath,
+                    useCache: scanRequest.forceRefreshEnv !== true
+                })
+                : null);
+            const environmentProbeMs = elapsedMsSince(tEnv0);
+
+            const useCache = this.enableCache && scanRequest.bypassCache !== true && !scanRequest.skipCache;
+            const tFinger0 = process.hrtime.bigint();
+            const inputFingerprint = useCache
+                ? await computeInputFingerprint(targetFullPath, { abortSignal })
+                : null;
+            const fingerprintMs = useCache ? elapsedMsSince(tFinger0) : 0;
+
+            const targetRelativePath = repoContext.repositoryRoot
+                ? path.relative(repoContext.repositoryRoot, targetFullPath).replace(/\\/g, '/')
+                : path.basename(targetFullPath);
+
+            const toolchainContextHash = stableHashObject({
+                sandboxAvailable: Boolean(sharedEnvReport?.sandboxAvailable),
+                selectedRuntime: sharedEnvReport?.selectedRuntime || null,
+                dotnetSdk: sharedEnvReport?.toolchains?.dotnet?.activeVersion || null,
+                platform: process.platform
+            });
+
             const allDiscoveredFindings = [];
-            const scannerResults = [];
+            const scannerResults = new Array(activeAdapters.length);
             const globalErrors = [];
             const globalWarnings = [];
+            const scannerTimings = {};
+            let cacheHits = 0;
+            let cacheMisses = 0;
+            let totalFilesScanned = 0;
+            let cacheLookupNs = 0n;
+            let lastFileProgressEmitMs = 0;
 
-            for (let i = 0; i < activeAdapters.length; i++) {
+            const screen = new ContentInjectionScreen();
+            let normalizationNs = 0n;
+
+            const runAdapter = async (i) => {
                 const scanner = activeAdapters[i];
-                onProgress({
+                if (abortSignal.aborted) {
+                    scannerResults[i] = {
+                        scannerId: scanner.id,
+                        status: SCANNER_STATUS.CANCELLED || 'Cancelled',
+                        cancelled: true,
+                        findings: [],
+                        durationMs: 0,
+                        errors: ['Scan cancelled before adapter execution.'],
+                        warnings: [],
+                        coverage: '0% (Cancelled)',
+                        fromCache: false
+                    };
+                    return;
+                }
+
+                emitProgress({
                     type: 'SCANNER_START',
                     scanId,
                     scannerId: scanner.id,
                     scannerName: scanner.name,
                     progressIndex: i + 1,
-                    totalScanners: activeAdapters.length
+                    totalScanners: activeAdapters.length,
+                    currentOperation: `Preparing ${scanner.name}`,
+                    totalEligibleFiles: inputFingerprint ? inputFingerprint.eligibleFileCount : undefined,
+                    indeterminate: !inputFingerprint || scanner.id !== 'secrets-config'
                 });
 
+                let cacheDescriptor = null;
+                if (useCache && inputFingerprint && repoContext.canonicalRepositoryId) {
+                    const tCache0 = process.hrtime.bigint();
+                    const ruleConfigHash = stableHashObject({
+                        scannerId: scanner.id,
+                        version: scanner.version,
+                        scanMode,
+                        rulesCount: scanner.rulesCount || 0,
+                        rules: Array.isArray(scanner.rules) ? scanner.rules.map(r => r.ruleId) : [],
+                        categories: scanner.supportedCategories || []
+                    });
+                    cacheDescriptor = {
+                        canonicalRepositoryId: repoContext.canonicalRepositoryId,
+                        targetRelativePath,
+                        inputHash: inputFingerprint.inputHash,
+                        scannerId: scanner.id,
+                        scannerVersion: scanner.version,
+                        ruleConfigHash,
+                        toolchainHash: toolchainContextHash,
+                        isAdvisoryDependent: scanner.id === 'nuget-audit'
+                    };
+                    const cacheCheck = this.scanCache.get(cacheDescriptor, {
+                        scanId,
+                        advisoryTtlMs: scanRequest.advisoryTtlMs,
+                        staticTtlMs: scanRequest.staticTtlMs,
+                        nowMs: scanRequest.nowMs
+                    });
+                    cacheLookupNs += (process.hrtime.bigint() - tCache0);
+
+                    if (cacheCheck.hit) {
+                        cacheHits++;
+                        const cachedRes = cacheCheck.result;
+                        scannerResults[i] = cachedRes;
+                        scannerTimings[scanner.id] = 0;
+                        if (cachedRes.scannedFileCount) {
+                            totalFilesScanned += cachedRes.scannedFileCount;
+                        }
+                        if (cachedRes.findings && cachedRes.findings.length > 0) {
+                            allDiscoveredFindings.push(...cachedRes.findings);
+                        }
+                        if (cachedRes.warnings && cachedRes.warnings.length > 0) {
+                            globalWarnings.push(...cachedRes.warnings.map(w => `[${scanner.name}] ${w}`));
+                        }
+                        emitProgress({
+                            type: 'SCANNER_COMPLETE',
+                            scanId,
+                            scannerId: scanner.id,
+                            scannerName: scanner.name,
+                            status: cachedRes.status,
+                            findingsCount: cachedRes.findings ? cachedRes.findings.length : 0,
+                            durationMs: 0,
+                            fromCache: true,
+                            cachedAt: cachedRes.cachedAt,
+                            freshnessStatus: cachedRes.freshnessStatus,
+                            filesScanned: cachedRes.scannedFileCount || 0
+                        });
+                        return;
+                    }
+                    cacheMisses++;
+                }
+
                 try {
+                    const tAdapter0 = process.hrtime.bigint();
                     const result = await scanner.scan(this.workspaceRoot, targetFullPath, {
                         scanId,
-                        timeoutMs: 60000,
+                        scanMode,
+                        timeoutMs: scanRequest.timeoutMs || 60000,
+                        extensionRoot: this.extensionRoot,
                         repoContext,
                         authorizedRoots: allAllowedRoots,
                         executionGateway: scanRequest.executionGateway || this.executionGateway,
                         sandboxBackend: scanRequest.sandboxBackend || this.sandboxBackend,
-                        envReport: scanRequest.envReport || this.envReport,
-                        profilesPath: scanRequest.profilesPath || this.profilesPath
+                        envReport: sharedEnvReport,
+                        profilesPath: scanRequest.profilesPath || this.profilesPath,
+                        abortSignal,
+                        onProgress: (subEvt) => {
+                            const nowMs = Date.now();
+                            if ((nowMs - lastFileProgressEmitMs) < 75 && subEvt.filesScanned !== subEvt.totalEligibleFiles) {
+                                return;
+                            }
+                            lastFileProgressEmitMs = nowMs;
+                            emitProgress({
+                                ...subEvt,
+                                scanId,
+                                scannerId: scanner.id,
+                                scannerName: scanner.name
+                            });
+                        }
                     });
+                    scannerTimings[scanner.id] = elapsedMsSince(tAdapter0);
+                    result.fromCache = false;
+                    if (result.scannedFileCount) {
+                        totalFilesScanned += result.scannedFileCount;
+                    }
 
-                    scannerResults.push(result);
+                    scannerResults[i] = result;
                     if (result.findings && result.findings.length > 0) {
-                        const screen = new ContentInjectionScreen();
+                        const tNorm0 = process.hrtime.bigint();
                         for (const f of result.findings) {
-                            // Ensure canonical repository provenance is attached even if custom scanner adapter emitted partial metadata
                             if (!f.repository && repoContext.repository) f.repository = repoContext.repository;
                             if (!f.repositoryRoot && repoContext.repositoryRoot) f.repositoryRoot = repoContext.repositoryRoot;
                             if (!f.canonicalRepositoryId && repoContext.canonicalRepositoryId) f.canonicalRepositoryId = repoContext.canonicalRepositoryId;
@@ -376,8 +604,14 @@ class ScanController {
                                 f.evidence = '[QUARANTINED_UNTRUSTED_EVIDENCE]';
                             }
                         }
+                        normalizationNs += (process.hrtime.bigint() - tNorm0);
                         allDiscoveredFindings.push(...result.findings);
                     }
+
+                    if (cacheDescriptor && (result.status === SCANNER_STATUS.COMPLETED || result.status === SCANNER_STATUS.NO_SCANNABLE_INPUTS)) {
+                        this.scanCache.set(cacheDescriptor, result);
+                    }
+
                     if (result.errors && result.errors.length > 0) {
                         globalErrors.push(...result.errors.map(e => `[${scanner.name}] ${e}`));
                     }
@@ -385,13 +619,18 @@ class ScanController {
                         globalWarnings.push(...result.warnings.map(w => `[${scanner.name}] ${w}`));
                     }
 
-                    onProgress({
-                        type: 'SCANNER_COMPLETE',
+                    emitProgress({
+                        type: result.cancelled ? 'SCANNER_CANCELLED' : 'SCANNER_COMPLETE',
                         scanId,
                         scannerId: scanner.id,
+                        scannerName: scanner.name,
                         status: result.status,
                         findingsCount: result.findings ? result.findings.length : 0,
-                        durationMs: result.durationMs
+                        durationMs: result.durationMs,
+                        fromCache: false,
+                        timedOut: Boolean(result.timedOut),
+                        timeoutReason: result.timeoutReason || '',
+                        filesScanned: result.scannedFileCount || 0
                     });
                 } catch (err) {
                     const failResult = {
@@ -401,29 +640,50 @@ class ScanController {
                         durationMs: 0,
                         errors: [err.message],
                         warnings: [],
-                        coverage: '0% (Execution error)'
+                        coverage: '0% (Execution error)',
+                        fromCache: false
                     };
-                    scannerResults.push(failResult);
+                    scannerResults[i] = failResult;
                     globalErrors.push(`[${scanner.name}] Unexpected error: ${err.message}`);
 
-                    onProgress({
+                    emitProgress({
                         type: 'SCANNER_FAILED',
                         scanId,
                         scannerId: scanner.id,
+                        scannerName: scanner.name,
                         error: err.message
                     });
                 }
-            }
+            };
 
-            const allNoInputs = scannerResults.length > 0 &&
+            const maxConcurrency = Math.max(1, Math.min(3, scanRequest.concurrency || 2));
+            let nextIdx = 0;
+            const adapterWorker = async () => {
+                while (nextIdx < activeAdapters.length) {
+                    const idx = nextIdx++;
+                    await runAdapter(idx);
+                }
+            };
+            const pool = [];
+            const workerCount = Math.min(maxConcurrency, Math.max(1, activeAdapters.length));
+            for (let w = 0; w < workerCount; w++) {
+                pool.push(adapterWorker());
+            }
+            await Promise.all(pool);
+
+            const wasCancelled = abortSignal.aborted || scannerResults.some(r => r && (r.cancelled || r.status === SCANNER_STATUS.CANCELLED));
+            const anyTimedOut = scannerResults.some(r => r && r.timedOut);
+
+            const allNoInputs = !wasCancelled && !anyTimedOut && scannerResults.length > 0 &&
                 scannerResults.every(r => r.status === SCANNER_STATUS.NO_SCANNABLE_INPUTS || r.noScannableInputs === true) &&
                 allDiscoveredFindings.length === 0 &&
                 globalErrors.length === 0;
 
-            const hasScannerFailures = globalErrors.length > 0 ||
+            const hasScannerFailures = wasCancelled || anyTimedOut || globalErrors.length > 0 ||
                 scannerResults.some(r => r.status === SCANNER_STATUS.FAILED || r.status === SCANNER_STATUS.UNAVAILABLE);
             const hasSuccessfulScanner = scannerResults.some(r => r.status === SCANNER_STATUS.COMPLETED);
 
+            const tPersist0 = process.hrtime.bigint();
             const ingestStats = this.findingsStore.ingestScanFindings(allDiscoveredFindings, scanId, {
                 canonicalRepositoryId: repoContext.canonicalRepositoryId,
                 repositoryRoot: repoContext.repositoryRoot,
@@ -441,14 +701,37 @@ class ScanController {
 
             const totalDuration = Date.now() - startTime;
             let overallStatus = 'Completed';
-            if (allNoInputs) {
+            if (wasCancelled) {
+                overallStatus = 'Cancelled';
+            } else if (allNoInputs) {
                 overallStatus = 'No Scannable Inputs';
             } else if (hasScannerFailures) {
                 overallStatus = (allDiscoveredFindings.length > 0 || hasSuccessfulScanner) ? 'Partial' : 'Failed';
             }
 
+            const metrics = {
+                environmentProbeMs,
+                discoveryMs: Number((tDiscRepoMs + fingerprintMs).toFixed(2)),
+                cacheLookupMs: Number((Number(cacheLookupNs) / 1e6).toFixed(2)),
+                normalizationMs: Number((Number(normalizationNs) / 1e6).toFixed(2)),
+                persistenceMs: 0,
+                uiUpdateMs: Number((Number(uiUpdateNs) / 1e6).toFixed(2)),
+                uiProgressEmitCount,
+                cancellationMs: (wasCancelled && this._cancelRequestedAtNs) ? elapsedMsSince(this._cancelRequestedAtNs) : 0,
+                totalMs: elapsedMsSince(tTotalNs),
+                repositoryFileCount: inputFingerprint ? inputFingerprint.repositoryFileCount : (repoContext.inspection?.sourceCounts?.totalFiles || 0),
+                eligibleFileCount: inputFingerprint ? inputFingerprint.eligibleFileCount : (repoContext.inspection?.sourceCounts?.nonEmptyFiles || 0),
+                filesScanned: totalFilesScanned,
+                cacheHits,
+                cacheMisses,
+                scannerTimings
+            };
+
             const sessionRecord = {
                 scanId,
+                scanMode,
+                coverageDisclosure,
+                omittedScanners,
                 timestamp: new Date().toISOString(),
                 targetPath: repoContext.repository || targetFullPath,
                 repositoryRoot: repoContext.repositoryRoot,
@@ -456,6 +739,8 @@ class ScanController {
                 applicationNumber: repoContext.applicationNumber,
                 durationMs: totalDuration,
                 status: overallStatus,
+                cancelled: wasCancelled,
+                timedOut: anyTimedOut,
                 noScannableInputs: allNoInputs,
                 unverifiedCoverage: hasScannerFailures,
                 scannersCount: activeAdapters.length,
@@ -464,26 +749,43 @@ class ScanController {
                     status: r.status,
                     coverage: r.coverage,
                     findingsCount: r.findings ? r.findings.length : 0,
+                    fromCache: Boolean(r.fromCache),
+                    cachedAt: r.cachedAt || null,
+                    freshnessStatus: r.freshnessStatus || null,
                     errors: r.errors || []
                 })),
                 findingsSummary,
-                ingestStats
+                ingestStats,
+                metrics
             };
             this.findingsStore.recordScanSession(sessionRecord);
+            metrics.persistenceMs = elapsedMsSince(tPersist0);
 
-            onProgress({
-                type: 'SCAN_FINISHED',
+            emitProgress({
+                type: wasCancelled ? 'SCAN_CANCELLED' : 'SCAN_FINISHED',
                 scanId,
+                scanMode,
+                coverageDisclosure,
                 status: overallStatus,
+                cancelled: wasCancelled,
+                timedOut: anyTimedOut,
                 durationMs: totalDuration,
-                findingsSummary
+                findingsSummary,
+                cacheHits,
+                cacheMisses,
+                indeterminate: false
             });
 
             return {
                 scanId,
+                scanMode,
+                coverageDisclosure,
+                omittedScanners,
                 status: overallStatus,
+                cancelled: wasCancelled,
+                timedOut: anyTimedOut,
                 noScannableInputs: allNoInputs,
-                reasonCode: allNoInputs ? 'NO_SCANNABLE_INPUTS' : null,
+                reasonCode: wasCancelled ? 'SCAN_CANCELLED' : (allNoInputs ? 'NO_SCANNABLE_INPUTS' : null),
                 unverifiedCoverage: hasScannerFailures,
                 timestamp: sessionRecord.timestamp,
                 durationMs: totalDuration,
@@ -494,11 +796,17 @@ class ScanController {
                 newFindings: allDiscoveredFindings,
                 errors: globalErrors,
                 warnings: globalWarnings,
-                repoContext
+                repoContext,
+                fromCache: cacheHits > 0 && cacheMisses === 0,
+                cacheHits,
+                cacheMisses,
+                metrics
             };
         } finally {
             this.isScanning = false;
             this.currentScanId = null;
+            this.currentAbortController = null;
+            this._cancelRequestedAtNs = null;
         }
     }
 
@@ -521,12 +829,22 @@ class ScanController {
     }
 
     cancelScan() {
-        if (!this.isScanning) return;
+        if (!this.isScanning) return { cancelled: false, reason: 'NO_ACTIVE_SCAN' };
+        this._cancelRequestedAtNs = process.hrtime.bigint();
+        const cancelledScanId = this.currentScanId;
+        if (this.currentAbortController) {
+            try { this.currentAbortController.abort(); } catch {}
+        }
         for (const scanner of this.scanners.values()) {
             scanner.cancel();
         }
         this.isScanning = false;
         this.currentScanId = null;
+        return {
+            cancelled: true,
+            scanId: cancelledScanId,
+            cancellationMs: elapsedMsSince(this._cancelRequestedAtNs)
+        };
     }
 }
 

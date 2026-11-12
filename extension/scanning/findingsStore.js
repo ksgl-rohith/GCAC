@@ -20,6 +20,8 @@ class FindingsStore {
         this.storageDir = storageDir || path.join(workspaceRoot, 'output', 'scans');
         this.findingsFile = path.join(this.storageDir, 'findings.json');
         this.historyFile = path.join(this.storageDir, 'scan-history.json');
+        this._findingsCache = null; // { mtimeMs, size, rawItems }
+        this._historyCache = null;  // { mtimeMs, size, items }
 
         this._ensureStorageDir();
     }
@@ -75,12 +77,18 @@ class FindingsStore {
     loadFindings() {
         this._ensureStorageDir();
         if (!fs.existsSync(this.findingsFile)) {
+            this._findingsCache = null;
             return [];
         }
         try {
+            const st = fs.statSync(this.findingsFile);
+            if (this._findingsCache && this._findingsCache.mtimeMs === st.mtimeMs && this._findingsCache.size === st.size) {
+                return this._findingsCache.rawItems.map(item => new NormalizedFinding(item));
+            }
             const raw = fs.readFileSync(this.findingsFile, 'utf-8');
             const parsed = JSON.parse(raw);
             if (!Array.isArray(parsed)) return [];
+            this._findingsCache = { mtimeMs: st.mtimeMs, size: st.size, rawItems: parsed };
             return parsed.map(item => new NormalizedFinding(item));
         } catch (e) {
             console.warn('Could not read findings store:', e.message);
@@ -99,7 +107,14 @@ class FindingsStore {
             const json = JSON.stringify(findings, null, 2);
             fs.writeFileSync(tmpFile, json, 'utf-8');
             fs.renameSync(tmpFile, this.findingsFile);
+            const st = fs.statSync(this.findingsFile);
+            this._findingsCache = {
+                mtimeMs: st.mtimeMs,
+                size: st.size,
+                rawItems: findings.map(f => ({ ...f }))
+            };
         } catch (e) {
+            this._findingsCache = null;
             try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (err) {}
             console.error('Failed to save findings store:', e.message);
         }
@@ -322,7 +337,11 @@ class FindingsStore {
 
         try {
             fs.writeFileSync(this.historyFile, JSON.stringify(history, null, 2), 'utf-8');
-        } catch (e) {}
+            const st = fs.statSync(this.historyFile);
+            this._historyCache = { mtimeMs: st.mtimeMs, size: st.size, items: history };
+        } catch (e) {
+            this._historyCache = null;
+        }
     }
 
     /**
@@ -330,9 +349,18 @@ class FindingsStore {
      * @returns {object[]}
      */
     getScanHistory() {
-        if (!fs.existsSync(this.historyFile)) return [];
+        if (!fs.existsSync(this.historyFile)) {
+            this._historyCache = null;
+            return [];
+        }
         try {
-            return JSON.parse(fs.readFileSync(this.historyFile, 'utf-8')) || [];
+            const st = fs.statSync(this.historyFile);
+            if (this._historyCache && this._historyCache.mtimeMs === st.mtimeMs && this._historyCache.size === st.size) {
+                return [...this._historyCache.items];
+            }
+            const parsed = JSON.parse(fs.readFileSync(this.historyFile, 'utf-8')) || [];
+            this._historyCache = { mtimeMs: st.mtimeMs, size: st.size, items: parsed };
+            return [...parsed];
         } catch (e) {
             return [];
         }
@@ -351,6 +379,7 @@ class FindingsStore {
      */
     clearFindings() {
         this.saveFindings([]);
+        this._historyCache = null;
         try {
             if (fs.existsSync(this.historyFile)) {
                 fs.writeFileSync(this.historyFile, '[]', 'utf-8');

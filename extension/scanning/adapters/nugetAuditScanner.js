@@ -40,7 +40,10 @@ class NuGetAuditScanner extends ScannerAdapter {
             };
         }
 
-        const envReport = discoverEnvironment(options?.workspaceRoot || process.cwd());
+        const envReport = options?.envReport || discoverEnvironment({
+            workspaceRoot: options?.workspaceRoot || process.cwd(),
+            useCache: true
+        });
         if (envReport.sandboxAvailable) {
             return {
                 available: true,
@@ -272,10 +275,13 @@ class NuGetAuditScanner extends ScannerAdapter {
         }
 
         const projectDirRoot = path.dirname(projectFile);
+        const envReport = options.envReport || (!options.executionGateway && !options.sandboxBackend
+            ? discoverEnvironment({ workspaceRoot, useCache: true })
+            : null);
         const gateway = options.executionGateway || new TrustedExecutionGateway({
             workspaceRoot,
             backend: options.sandboxBackend || null,
-            envReport: options.envReport || null,
+            envReport,
             profilesPath: options.profilesPath
         });
 

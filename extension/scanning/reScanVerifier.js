@@ -57,7 +57,7 @@ class ReScanVerifier {
 
         if (!originalFinding) {
             const reason = 'Missing original finding context.';
-            const md = '### ⚠️ Re-Scan Verification\n- Status: `NOT VERIFIED` (No original finding supplied)\n';
+            const md = '### Re-Scan Verification\n- Status: `NOT VERIFIED` (No original finding supplied)\n';
             return {
                 status: VERIFICATION_STATUS.NOT_VERIFIED,
                 machineStatus: OUTCOME_STATUS.NOT_VERIFIED,
@@ -79,7 +79,7 @@ class ReScanVerifier {
         if (!origin.resolved || !origin.scannerId) {
             const rawDisplay = origin.rawScannerId || 'unspecified';
             const reason = `Cannot verify remediation: originating scanner '${rawDisplay}' is missing or unrecognized. Silent scanner fallback is disabled.`;
-            const md = `### ⚠️ Re-Scan Verification\n- Scanner: \`${rawDisplay}\`\n- Status: \`NOT VERIFIED\` (${reason})\n`;
+            const md = `### Re-Scan Verification\n- Scanner: \`${rawDisplay}\`\n- Status: \`NOT VERIFIED\` (${reason})\n`;
             return {
                 status: VERIFICATION_STATUS.NOT_VERIFIED,
                 machineStatus: OUTCOME_STATUS.NOT_VERIFIED,
@@ -100,7 +100,7 @@ class ReScanVerifier {
         const scanner = this.scanController && this.scanController.scanners ? this.scanController.scanners.get(scannerId) : null;
         if (!scanner) {
             const reason = `Original scanner '${scannerId}' is not registered or unavailable.`;
-            const md = `### ⚠️ Re-Scan Verification\n- Scanner: \`${scannerId}\`\n- Status: \`NOT VERIFIED\` (Scanner unavailable on local host)\n`;
+            const md = `### Re-Scan Verification\n- Scanner: \`${scannerId}\`\n- Status: \`NOT VERIFIED\` (Scanner unavailable on local host)\n`;
             return {
                 status: VERIFICATION_STATUS.NOT_VERIFIED,
                 machineStatus: OUTCOME_STATUS.NOT_VERIFIED,
@@ -128,7 +128,7 @@ class ReScanVerifier {
         });
         if (!avail.available) {
             const reason = `Scanner '${scanner.name}' runtime is not installed: ${avail.reason}`;
-            const md = `### ⚠️ Re-Scan Verification: ${scanner.name}\n- Status: \`NOT VERIFIED\`\n- Reason: Required runtime unavailable on machine (${avail.reason})\n`;
+            const md = `### Re-Scan Verification: ${scanner.name}\n- Status: \`NOT VERIFIED\`\n- Reason: Required runtime unavailable on machine (${avail.reason})\n`;
             return {
                 status: VERIFICATION_STATUS.NOT_VERIFIED,
                 machineStatus: OUTCOME_STATUS.NOT_VERIFIED,
@@ -171,7 +171,7 @@ class ReScanVerifier {
             });
         } catch (e) {
             const reason = `Scanner execution failed during re-scan: ${e.message}`;
-            const md = `### ⚠️ Re-Scan Verification: ${scanner.name}\n- Status: \`NOT VERIFIED\`\n- Error: ${e.message}\n`;
+            const md = `### Re-Scan Verification: ${scanner.name}\n- Status: \`NOT VERIFIED\`\n- Error: ${e.message}\n`;
             return {
                 status: VERIFICATION_STATUS.NOT_VERIFIED,
                 machineStatus: OUTCOME_STATUS.NOT_VERIFIED,
@@ -263,7 +263,7 @@ class ReScanVerifier {
 
         // Format Markdown Comparison Evidence
         const evidenceMarkdown = [
-            `### 🔬 Post-Remediation Verification & Re-Scan Audit`,
+            `### Post-Remediation Verification & Re-Scan Audit`,
             `- **Scanner**: \`${scanner.name}\` (ID: \`${scanner.id}\`, Version: \`${scanner.version}\`)`,
             `- **Execution Policy**: \`${executionPolicy}\` (Sandbox: \`${sandboxStatus}\`)`,
             `- **Verification Status**: **\`${finalStatus}\`** (\`${machineStatus}\`)`,

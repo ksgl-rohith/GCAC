@@ -1,11 +1,14 @@
 'use strict';
 
-const { execFileSync } = require('child_process');
+const { execFileSync, spawn } = require('child_process');
 const path = require('path');
 const fs   = require('fs');
 const os   = require('os');
 const { ScannerAdapter } = require('../scannerAdapter');
 const { NormalizedFinding, SCANNER_STATUS, SEVERITY_LEVELS, inferTechnologyFromFilePath } = require('../findingModel');
+const { findExecutableOnPath } = require('../../sandbox/environmentDiscovery');
+
+const _codeqlVersionCache = new Map();
 
 class CodeQLScanner extends ScannerAdapter {
     constructor(options = {}) {
@@ -29,10 +32,11 @@ class CodeQLScanner extends ScannerAdapter {
         });
 
         this._workspaceRoot = options.workspaceRoot || null;
+        this._extensionRoot = options.extensionRoot || null;
         this._resolvedBinary = null;
     }
 
-    _findCodeqlBinary(workspaceRoot) {
+    _findCodeqlBinary(workspaceRoot, extensionRoot = null) {
         const exeName = process.platform === 'win32' ? 'codeql.exe' : 'codeql';
 
         const envPath = process.env.CODEQL_PATH;
@@ -40,8 +44,8 @@ class CodeQLScanner extends ScannerAdapter {
             return envPath;
         }
 
-        const root = workspaceRoot || this._workspaceRoot;
-        if (root) {
+        const roots = [workspaceRoot, this._workspaceRoot, extensionRoot, this._extensionRoot].filter(Boolean);
+        for (const root of roots) {
             const localBin = path.join(root, 'tools', 'codeql', exeName);
             if (fs.existsSync(localBin)) return localBin;
             const nestedBin = path.join(root, 'tools', 'codeql', 'codeql', exeName);
@@ -64,25 +68,18 @@ class CodeQLScanner extends ScannerAdapter {
             if (c && fs.existsSync(c)) return c;
         }
 
-        try {
-            const lookupTool = process.platform === 'win32' ? 'where' : 'which';
-            const found = execFileSync(lookupTool, [exeName], {
-                stdio: 'pipe',
-                timeout: 3000,
-                encoding: 'utf-8',
-                shell: false
-            }).trim().split(/\r?\n/)[0].trim();
-            if (found && fs.existsSync(found)) return found;
-        } catch {}
-
-        return null;
+        return findExecutableOnPath([exeName]);
     }
 
-    async isAvailable(optionsOrWorkspaceRoot) {
-        const root = (optionsOrWorkspaceRoot && typeof optionsOrWorkspaceRoot === 'object')
+    async isAvailable(optionsOrWorkspaceRoot, maybeExtensionRoot = null) {
+        const isObj = optionsOrWorkspaceRoot && typeof optionsOrWorkspaceRoot === 'object';
+        const root = isObj
             ? (optionsOrWorkspaceRoot.workspaceRoot || this._workspaceRoot)
             : (optionsOrWorkspaceRoot || this._workspaceRoot);
-        const bin = this._findCodeqlBinary(root);
+        const extRoot = isObj
+            ? (optionsOrWorkspaceRoot.extensionRoot || maybeExtensionRoot || this._extensionRoot)
+            : (maybeExtensionRoot || this._extensionRoot);
+        const bin = this._findCodeqlBinary(root, extRoot);
 
         if (!bin) {
             this.status = SCANNER_STATUS.NOT_INSTALLED;
@@ -92,13 +89,22 @@ class CodeQLScanner extends ScannerAdapter {
                 binaryPath: null,
                 reason: [
                     'CodeQL CLI not found. Install it via one of the following methods:',
-                    '  • Run: node scripts/setup-codeql.js  (auto-installs to tools/codeql/)',
-                    '  • Download manually from https://github.com/github/codeql-action/releases',
-                    '    and extract to <workspace>/tools/codeql/',
-                    '  • Set the CODEQL_PATH environment variable to the codeql executable',
+                    '  - Run: node scripts/setup-codeql.js (auto-installs to tools/codeql/)',
+                    '  - Download manually from https://github.com/github/codeql-action/releases and extract to <workspace>/tools/codeql/',
+                    '  - Set the CODEQL_PATH environment variable to the codeql executable',
                     'CodeQL scanning is optional and does not block other scanner adapters.'
                 ].join('\n')
             };
+        }
+
+        const useCache = !isObj || optionsOrWorkspaceRoot.useCache !== false;
+        if (useCache && _codeqlVersionCache.has(bin)) {
+            const cached = _codeqlVersionCache.get(bin);
+            if ((Date.now() - cached.checkedAt) < 60000) {
+                this.status = SCANNER_STATUS.READY;
+                this._resolvedBinary = bin;
+                return { ...cached.info };
+            }
         }
 
         try {
@@ -114,12 +120,14 @@ class CodeQLScanner extends ScannerAdapter {
             const parsed = JSON.parse(ver);
             this.status = SCANNER_STATUS.READY;
             this._resolvedBinary = bin;
-            return {
+            const info = {
                 available: true,
                 version: parsed.version || 'unknown',
                 binaryPath: bin,
                 reason: ''
             };
+            _codeqlVersionCache.set(bin, { checkedAt: Date.now(), info });
+            return info;
         } catch (e) {
             this.status = SCANNER_STATUS.NOT_INSTALLED;
             return {
@@ -133,6 +141,7 @@ class CodeQLScanner extends ScannerAdapter {
 
     /**
      * Scans target directory/file for non-empty supported language files.
+     * Uses bounded 512-byte reads rather than ingesting entire source trees.
      * Returns null when no supported non-empty source files exist (never guesses csharp!).
      */
     _detectLanguage(targetPath) {
@@ -143,8 +152,16 @@ class CodeQLScanner extends ScannerAdapter {
             try {
                 const st = fs.statSync(filePath);
                 if (!st.isFile() || st.size === 0) return false;
-                const sample = fs.readFileSync(filePath, 'utf8');
-                return sample.trim().length > 0;
+                const readLen = Math.min(st.size, 512);
+                const fd = fs.openSync(filePath, 'r');
+                try {
+                    const buf = Buffer.allocUnsafe(readLen);
+                    const bytesRead = fs.readSync(fd, buf, 0, readLen, 0);
+                    const sample = buf.subarray(0, bytesRead).toString('utf8');
+                    return sample.trim().length > 0 || st.size > readLen;
+                } finally {
+                    fs.closeSync(fd);
+                }
             } catch {
                 return false;
             }
@@ -326,7 +343,11 @@ class CodeQLScanner extends ScannerAdapter {
     async scan(workspaceRoot, targetPath, options = {}) {
         const scanId    = options.scanId || `codeql-${Date.now()}`;
         const startTime = Date.now();
+        const tTotal = process.hrtime.bigint();
         this._workspaceRoot = workspaceRoot;
+        this._cancelled = false;
+        const onProgress = typeof options.onProgress === 'function' ? options.onProgress : () => {};
+        const abortSignal = options.abortSignal || null;
 
         const scanTarget = targetPath || workspaceRoot;
         if (!scanTarget || !fs.existsSync(scanTarget)) {
@@ -340,7 +361,9 @@ class CodeQLScanner extends ScannerAdapter {
             );
         }
 
+        const tDetect0 = process.hrtime.bigint();
         const langInfo = this._detectLanguage(scanTarget);
+        const discoveryMs = Number(process.hrtime.bigint() - tDetect0) / 1e6;
         if (!langInfo) {
             return {
                 ...this._buildResult(
@@ -349,13 +372,14 @@ class CodeQLScanner extends ScannerAdapter {
                     startTime,
                     [],
                     ['No CodeQL-supported non-empty source files found in target.'],
-                    '0% (No CodeQL-supported non-empty source files)'
+                    '0% (No CodeQL-supported non-empty source files)',
+                    { metrics: { discoveryMs: Number(discoveryMs.toFixed(2)), externalProcessMs: 0, parsingMs: 0, totalMs: Number((Number(process.hrtime.bigint() - tTotal) / 1e6).toFixed(2)) } }
                 ),
                 noScannableInputs: true
             };
         }
 
-        const avail = await this.isAvailable(workspaceRoot);
+        const avail = await this.isAvailable({ workspaceRoot, extensionRoot: options.extensionRoot || this._extensionRoot });
         if (!avail.available) {
             this.status = SCANNER_STATUS.NOT_INSTALLED;
             this.statusReason = avail.reason;
@@ -372,8 +396,19 @@ class CodeQLScanner extends ScannerAdapter {
                     avail.reason
                 ],
                 coverage:   '0% (CodeQL CLI not installed — optional scanner)',
-                binaryPath: null
+                binaryPath: null,
+                metrics: {
+                    discoveryMs: Number(discoveryMs.toFixed(2)),
+                    externalProcessMs: 0,
+                    parsingMs: 0,
+                    totalMs: Number((Number(process.hrtime.bigint() - tTotal) / 1e6).toFixed(2))
+                }
             };
+        }
+
+        if (this._cancelled || (abortSignal && abortSignal.aborted)) {
+            this.status = SCANNER_STATUS.CANCELLED || 'Cancelled';
+            return this._buildResult(SCANNER_STATUS.CANCELLED || 'Cancelled', [], startTime, ['CodeQL scan cancelled before execution.'], [], '0% (Cancelled)', { cancelled: true });
         }
 
         const codeqlBin  = avail.binaryPath || this._resolvedBinary;
@@ -385,6 +420,8 @@ class CodeQLScanner extends ScannerAdapter {
         const sarifOutput = path.join(os.tmpdir(), `gcac-codeql-${stamp}.sarif`);
 
         this.status = SCANNER_STATUS.RUNNING;
+        let externalProcessNs = 0n;
+        let parsingNs = 0n;
 
         try {
             const createArgs = [
@@ -397,7 +434,22 @@ class CodeQLScanner extends ScannerAdapter {
             ];
             if (buildMode) createArgs.push(buildMode);
 
-            this._execCodeql(codeqlBin, createArgs, { timeout: timeoutMs });
+            onProgress({
+                type: 'SCANNER_FILE_PROGRESS',
+                scanId,
+                scannerId: this.id,
+                currentOperation: `Creating CodeQL ${language} database`,
+                indeterminate: true,
+                elapsedMs: Date.now() - startTime
+            });
+
+            const tProc1 = process.hrtime.bigint();
+            await this._execCodeqlAsync(codeqlBin, createArgs, { timeout: timeoutMs, abortSignal });
+            externalProcessNs += (process.hrtime.bigint() - tProc1);
+
+            if (this._cancelled || (abortSignal && abortSignal.aborted)) {
+                throw new Error('SCAN_CANCELLED');
+            }
 
             const analyzeArgs = [
                 'database', 'analyze',
@@ -408,15 +460,27 @@ class CodeQLScanner extends ScannerAdapter {
                 '--no-print-metrics-summary'
             ];
 
-            this._execCodeql(codeqlBin, analyzeArgs, { timeout: timeoutMs });
+            onProgress({
+                type: 'SCANNER_FILE_PROGRESS',
+                scanId,
+                scannerId: this.id,
+                currentOperation: `Running CodeQL ${language} security queries`,
+                indeterminate: true,
+                elapsedMs: Date.now() - startTime
+            });
+
+            const tProc2 = process.hrtime.bigint();
+            await this._execCodeqlAsync(codeqlBin, analyzeArgs, { timeout: timeoutMs, abortSignal });
+            externalProcessNs += (process.hrtime.bigint() - tProc2);
 
             if (!fs.existsSync(sarifOutput)) {
                 return this._buildResult(SCANNER_STATUS.FAILED, [], startTime, ['CodeQL analysis completed without SARIF output; cannot claim zero vulnerabilities.'], [], `0% (${language} — SARIF output missing)`);
             }
 
+            const tParse = process.hrtime.bigint();
             const repoContext = options.repoContext || {};
             const effectiveRepoRoot = repoContext.repositoryRoot || (fs.statSync(scanTarget).isDirectory() ? scanTarget : path.dirname(scanTarget));
-            const sarifRaw = fs.readFileSync(sarifOutput, 'utf-8');
+            const sarifRaw = await fs.promises.readFile(sarifOutput, 'utf-8');
             const findings = this.parseSarif(sarifRaw, effectiveRepoRoot, scanId, {
                 repository: repoContext.repository || effectiveRepoRoot,
                 repositoryRoot: effectiveRepoRoot,
@@ -425,6 +489,7 @@ class CodeQLScanner extends ScannerAdapter {
                 applicationName: repoContext.applicationName || '',
                 applicationIdentitySource: repoContext.applicationIdentitySource || ''
             });
+            parsingNs = process.hrtime.bigint() - tParse;
 
             this.status = SCANNER_STATUS.COMPLETED;
             return this._buildResult(
@@ -433,35 +498,70 @@ class CodeQLScanner extends ScannerAdapter {
                 startTime,
                 [],
                 [],
-                `100% (CodeQL ${language} semantic analysis — ${findings.length} finding(s))`
+                `100% (CodeQL ${language} semantic analysis — ${findings.length} finding(s))`,
+                {
+                    metrics: {
+                        discoveryMs: Number(discoveryMs.toFixed(2)),
+                        externalProcessMs: Number((Number(externalProcessNs) / 1e6).toFixed(2)),
+                        parsingMs: Number((Number(parsingNs) / 1e6).toFixed(2)),
+                        totalMs: Number((Number(process.hrtime.bigint() - tTotal) / 1e6).toFixed(2))
+                    }
+                }
             );
 
         } catch (err) {
+            const isCancelled = this._cancelled || (abortSignal && abortSignal.aborted) || (err.message && err.message.includes('SCAN_CANCELLED'));
+            if (isCancelled) {
+                this.status = SCANNER_STATUS.CANCELLED || 'Cancelled';
+                return this._buildResult(SCANNER_STATUS.CANCELLED || 'Cancelled', [], startTime, ['CodeQL analysis cancelled; incomplete execution.'], [], '0% (Cancelled)', {
+                    cancelled: true,
+                    metrics: {
+                        discoveryMs: Number(discoveryMs.toFixed(2)),
+                        externalProcessMs: Number((Number(externalProcessNs) / 1e6).toFixed(2)),
+                        parsingMs: 0,
+                        totalMs: Number((Number(process.hrtime.bigint() - tTotal) / 1e6).toFixed(2))
+                    }
+                });
+            }
             this.status = SCANNER_STATUS.FAILED;
             const isTimeout = err.message && (err.message.includes('ETIMEDOUT') || err.message.includes('timed out') || err.message.includes('timeout'));
             const errorMsg  = isTimeout
-                ? `CodeQL analysis timed out after ${Math.round(timeoutMs / 1000)}s. Consider increasing timeoutMs or scanning a smaller target.`
+                ? `CodeQL analysis timed out after ${Math.round(timeoutMs / 1000)}s (incomplete execution).`
                 : `CodeQL execution error: ${err.message}`;
 
-            return this._buildResult(SCANNER_STATUS.FAILED, [], startTime, [errorMsg], [], '0% (Execution failure)');
+            return this._buildResult(SCANNER_STATUS.FAILED, [], startTime, [errorMsg], [], isTimeout ? '0% (Timed out — incomplete execution)' : '0% (Execution failure)', {
+                timedOut: isTimeout,
+                timeoutReason: isTimeout ? errorMsg : undefined,
+                metrics: {
+                    discoveryMs: Number(discoveryMs.toFixed(2)),
+                    externalProcessMs: Number((Number(externalProcessNs) / 1e6).toFixed(2)),
+                    parsingMs: 0,
+                    totalMs: Number((Number(process.hrtime.bigint() - tTotal) / 1e6).toFixed(2))
+                }
+            });
 
         } finally {
+            this.activeProcess = null;
             try { if (fs.existsSync(tempDbDir))   fs.rmSync(tempDbDir,   { recursive: true, force: true }); } catch {}
             try { if (fs.existsSync(sarifOutput)) fs.unlinkSync(sarifOutput); } catch {}
         }
     }
 
-    _execCodeql(bin, args, opts = {}) {
+    _validateExecArgs(bin, args) {
         if (typeof bin !== 'string' || !bin.trim() || bin.includes('\0')) {
             throw new Error('Invalid CodeQL executable path.');
         }
-        const safeArgs = (Array.isArray(args) ? args : []).map((arg) => {
+        return (Array.isArray(args) ? args : []).map((arg) => {
             const str = String(arg ?? '');
             if (str.includes('\0')) {
                 throw new Error('CodeQL argument contains invalid null byte.');
             }
             return str;
         });
+    }
+
+    _execCodeql(bin, args, opts = {}) {
+        const safeArgs = this._validateExecArgs(bin, args);
         execFileSync(bin, safeArgs, {
             timeout: opts.timeout || 180000,
             stdio: 'ignore',
@@ -470,7 +570,89 @@ class CodeQLScanner extends ScannerAdapter {
         });
     }
 
-    _buildResult(status, findings, startTime, errors, warnings, coverage) {
+    _execCodeqlAsync(bin, args, opts = {}) {
+        const safeArgs = this._validateExecArgs(bin, args);
+        const timeoutMs = opts.timeout || 180000;
+        const abortSignal = opts.abortSignal || null;
+
+        return new Promise((resolve, reject) => {
+            if (this._cancelled || (abortSignal && abortSignal.aborted)) {
+                return reject(new Error('SCAN_CANCELLED'));
+            }
+
+            let finished = false;
+            let timedOut = false;
+            let cancelled = false;
+            let forceKillTimer = null;
+            let timeoutTimer = null;
+
+            const child = spawn(bin, safeArgs, {
+                stdio: ['ignore', 'ignore', 'pipe'],
+                windowsHide: true,
+                shell: false
+            });
+            this.activeProcess = child;
+
+            let stderrBuf = '';
+            if (child.stderr) {
+                child.stderr.on('data', (chunk) => {
+                    if (stderrBuf.length < 4096) stderrBuf += String(chunk);
+                });
+            }
+
+            const killChild = (reason) => {
+                if (finished) return;
+                if (reason === 'timeout') timedOut = true;
+                if (reason === 'cancel') cancelled = true;
+                try { child.kill('SIGTERM'); } catch {}
+                forceKillTimer = setTimeout(() => {
+                    try { child.kill('SIGKILL'); } catch {}
+                }, 400);
+                if (forceKillTimer.unref) forceKillTimer.unref();
+            };
+
+            const onAbort = () => killChild('cancel');
+            if (abortSignal) {
+                abortSignal.addEventListener('abort', onAbort, { once: true });
+            }
+
+            timeoutTimer = setTimeout(() => killChild('timeout'), timeoutMs);
+            if (timeoutTimer.unref) timeoutTimer.unref();
+
+            const cleanup = () => {
+                if (timeoutTimer) clearTimeout(timeoutTimer);
+                if (forceKillTimer) clearTimeout(forceKillTimer);
+                if (abortSignal) abortSignal.removeEventListener('abort', onAbort);
+                if (this.activeProcess === child) this.activeProcess = null;
+            };
+
+            child.on('error', (err) => {
+                if (finished) return;
+                finished = true;
+                cleanup();
+                reject(err);
+            });
+
+            child.on('close', (code, signal) => {
+                if (finished) return;
+                finished = true;
+                cleanup();
+                if (cancelled || this._cancelled) {
+                    return reject(new Error('SCAN_CANCELLED'));
+                }
+                if (timedOut) {
+                    return reject(new Error(`ETIMEDOUT: CodeQL process timed out after ${timeoutMs}ms`));
+                }
+                if (code === 0) {
+                    return resolve();
+                }
+                const detail = stderrBuf.trim() ? `: ${stderrBuf.trim().slice(0, 400)}` : '';
+                return reject(new Error(`CodeQL exited with code ${code}${signal ? ` (signal ${signal})` : ''}${detail}`));
+            });
+        });
+    }
+
+    _buildResult(status, findings, startTime, errors, warnings, coverage, extra = {}) {
         return {
             scannerId:  this.id,
             status,
@@ -479,7 +661,8 @@ class CodeQLScanner extends ScannerAdapter {
             durationMs: Date.now() - startTime,
             errors,
             warnings,
-            coverage
+            coverage,
+            ...extra
         };
     }
 }

@@ -532,7 +532,11 @@ async function run() {
         fs.symlinkSync(outsideTarget, linkInsideRepo, 'junction');
         const symCheck = assertNoSymlinkEscape(isoRun1.worktreeDir, 'escape-link/secret.cs');
         assert.strictEqual(symCheck.safe, false);
-        fs.rmdirSync(linkInsideRepo);
+        if (fs.lstatSync(linkInsideRepo).isSymbolicLink()) {
+            fs.unlinkSync(linkInsideRepo);
+        } else {
+            fs.rmdirSync(linkInsideRepo);
+        }
 
         // Pre/post filesystem snapshot detects out-of-scope edits on disk
         const cleanSnap = captureWorkspaceSnapshot(isoRun1.worktreeDir);

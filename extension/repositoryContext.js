@@ -235,13 +235,14 @@ function discoverProjectManifests(targetRoot, maxDepth = 5) {
             const st = fs.statSync(fullPath);
             size = st.size;
             if (size > 0) {
-                const readLen = Math.min(size, 65536);
+                const isCsproj = lower.endsWith('.csproj');
+                const readLen = isCsproj ? Math.min(size, 65536) : Math.min(size, 512);
                 const fd = fs.openSync(fullPath, 'r');
                 try {
-                    const buf = Buffer.alloc(readLen);
+                    const buf = Buffer.allocUnsafe(readLen);
                     const bytesRead = fs.readSync(fd, buf, 0, readLen, 0);
-                    contentPreview = buf.slice(0, bytesRead).toString('utf8');
-                    nonEmpty = contentPreview.trim().length > 0;
+                    contentPreview = buf.subarray(0, bytesRead).toString('utf8');
+                    nonEmpty = contentPreview.trim().length > 0 || (!isCsproj && size > readLen);
                 } finally {
                     fs.closeSync(fd);
                 }

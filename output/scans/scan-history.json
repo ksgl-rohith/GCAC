@@ -1,5 +1,70 @@
 [
   {
+    "scanId": "SCAN-1794453302066",
+    "timestamp": "2026-11-12T03:24:00.113Z",
+    "targetPath": "sample-repos",
+    "repositoryRoot": "/Users/ksglrohith/Documents/GitHub/GCAC/sample-repos",
+    "canonicalRepositoryId": "46e6cd9a565f",
+    "applicationNumber": "LOCAL-46E6CD9A",
+    "durationMs": 538047,
+    "status": "Partial",
+    "noScannableInputs": false,
+    "unverifiedCoverage": true,
+    "scannersCount": 4,
+    "scannerSummary": [
+      {
+        "id": "secrets-config",
+        "status": "Completed",
+        "coverage": "100% (30 non-empty file(s) scanned)",
+        "findingsCount": 6,
+        "errors": []
+      },
+      {
+        "id": "dotnet-security",
+        "status": "Failed",
+        "coverage": "0% (Build-backed security scan blocked or failed)",
+        "findingsCount": 0,
+        "errors": [
+          "SANDBOX_UNAVAILABLE: failed to connect to the docker API at unix:///Users/ksglrohith/.docker/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/ksglrohith/.docker/run/docker.sock: connect: no such file or directory Host-shell fallback is prohibited."
+        ]
+      },
+      {
+        "id": "nuget-audit",
+        "status": "Failed",
+        "coverage": "0% (Sandbox unavailable — NuGet audit blocked)",
+        "findingsCount": 0,
+        "errors": [
+          "SANDBOX_UNAVAILABLE: failed to connect to the docker API at unix:///Users/ksglrohith/.docker/run/docker.sock; check if the path is correct and if the daemon is running: dial unix /Users/ksglrohith/.docker/run/docker.sock: connect: no such file or directory Host-shell fallback is prohibited."
+        ]
+      },
+      {
+        "id": "codeql",
+        "status": "Failed",
+        "coverage": "0% (Execution failure)",
+        "findingsCount": 0,
+        "errors": [
+          "CodeQL analysis timed out after 60s. Consider increasing timeoutMs or scanning a smaller target."
+        ]
+      }
+    ],
+    "findingsSummary": {
+      "total": 6,
+      "critical": 1,
+      "high": 5,
+      "medium": 0,
+      "low": 0,
+      "informational": 0
+    },
+    "ingestStats": {
+      "added": 6,
+      "updated": 0,
+      "total": 11,
+      "activeTotal": 6,
+      "newCount": 6,
+      "updatedCount": 0
+    }
+  },
+  {
     "scanId": "SCAN-1793786583915",
     "timestamp": "2026-11-04T10:04:12.475Z",
     "targetPath": "sample-repos\\customer-service",

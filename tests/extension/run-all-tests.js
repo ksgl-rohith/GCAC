@@ -11,6 +11,7 @@ const phase1SecurityTests = require('./phase1Security.test');
 const phase2SecurityTests = require('./phase2Security.test');
 const { runPhase3SandboxSecurityTests } = require('./phase3SandboxSecurity.test');
 const realWorldUsabilityTests = require('./realWorldUsability.test');
+const productionStabilizationTests = require('./productionStabilization.test');
 
 async function main() {
     console.log('===============================================================');
@@ -31,7 +32,8 @@ async function main() {
         { name: 'Phase 1 P0 Security Containment & Core Integrity', fn: phase1SecurityTests.run },
         { name: 'Phase 2 Trust Controls & Secure Remediation Governance', fn: phase2SecurityTests.run },
         { name: 'Phase 3 Execution Isolation, Approved Toolchains & Supply Chain Security', fn: runPhase3SandboxSecurityTests },
-        { name: 'Real-World Usability, Scan Accuracy, Portability & Retry', fn: realWorldUsabilityTests.run }
+        { name: 'Real-World Usability, Scan Accuracy, Portability & Retry', fn: realWorldUsabilityTests.run },
+        { name: 'Production Workflow Stabilization & Reliability', fn: productionStabilizationTests.run }
     ];
 
     let passedSuites = 0;

@@ -89,13 +89,21 @@ class ScannerAdapter {
      * Cancels any currently executing child process
      */
     cancel() {
+        this._cancelled = true;
         if (this.activeProcess && !this.activeProcess.killed) {
+            const proc = this.activeProcess;
             try {
-                this.activeProcess.kill('SIGTERM');
+                proc.kill('SIGTERM');
             } catch (e) {}
-            this.status = SCANNER_STATUS.CANCELLED;
-            this.statusReason = 'Scan cancelled by user';
+            const killTimer = setTimeout(() => {
+                try {
+                    if (!proc.killed) proc.kill('SIGKILL');
+                } catch (e) {}
+            }, 350);
+            if (killTimer.unref) killTimer.unref();
         }
+        this.status = SCANNER_STATUS.CANCELLED;
+        this.statusReason = 'Scan cancelled by user';
     }
 }
 

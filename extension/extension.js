@@ -31,6 +31,16 @@ const {
     recordApprovalDecision,
     COPILOT_APPROVAL_LIMITATION_DISCLOSURE
 } = require('./approvalGovernance');
+const { RunStateManager } = require('./runStateContract');
+const { buildEvidenceChecklist } = require('./evidenceChecklist');
+const {
+    formatHelpMarkdown,
+    formatRunHeaderMarkdown,
+    formatStageEventMarkdown,
+    formatGateMarkdown,
+    formatTerminalConclusionMarkdown,
+    formatErrorMarkdown
+} = require('./copilotOutputFormatter');
 
 let currentPanel = undefined;
 let sidebarProvider = null;
@@ -62,7 +72,7 @@ const ALLOWED_IPC_COMMANDS = new Set([
     'requestData',
     'refresh',
     'loadDetails',
-    'runRemediation',
+    'syncRunState',
     'retryStage',
     'reviseFix',
     'mapFindingRepository',
@@ -191,7 +201,7 @@ function buildConfigPayload(extra = {}) {
 function getSandboxUiSnapshot(workspaceRoot, gateway = null) {
     let env;
     try {
-        env = discoverEnvironment(workspaceRoot);
+        env = discoverEnvironment(workspaceRoot, { useCache: true });
     } catch (err) {
         env = {
             sandboxAvailable: false,
@@ -660,15 +670,7 @@ function activate(context) {
                 const vulnId = match ? (Array.isArray(match) ? match[0] : match) : null;
 
                 if (!vulnId) {
-                    response.markdown('### 🛡️ GCAC Vulnerability Orchestrator\n\n' +
-                        'Welcome to the Multi-Agent Vulnerability Remediation Agent (powered by GitHub Copilot).\n\n' +
-                        '**Available Copilot Chat Commands:**\n' +
-                        '- `@vulnerability-orchestrator /remediate-vulnerability <ID>`: Initiate pipeline (Classification, RCA, Baseline Testing, Patch -> Pauses at Stage 4 Human Gate)\n' +
-                        '- `@vulnerability-orchestrator /approve <ID>`: Authorize Stage 4 Gate -> Applies patch and runs Post-Fix & Regression Tests\n' +
-                        '- `@vulnerability-orchestrator /final-approve <ID>`: Sign off Final Gate -> Finalizes Documentation & updates CSV row\n\n' +
-                        '**Example:**\n' +
-                        '`@vulnerability-orchestrator /remediate-vulnerability VUL-POC-008`\n\n' +
-                        'Or open the visual dashboard via `GCAC: Open Remediation Dashboard`.');
+                    response.markdown(formatHelpMarkdown());
                     return;
                 }
 
@@ -686,60 +688,66 @@ function activate(context) {
                 if (requestedRepoArg && path.isAbsolute(requestedRepoArg)) {
                     const matched = assertPathWithinAuthorizedRoots(requestedRepoArg, authRoots);
                     if (!matched) {
-                        response.markdown(`\n\n❌ **SEC-02 / Boundary Blocked**: Repository '${requestedRepoArg}' is outside authorized workspace/registered roots. Select or map it via the GCAC Remediation Hub first.\n`);
+                        response.markdown(formatErrorMarkdown(
+                            'SEC-02 / Boundary Blocked',
+                            `Repository '${requestedRepoArg}' is outside authorized workspace/registered roots. Select or map it via the GCAC Remediation Hub first.`
+                        ));
                         return;
                     }
                 }
 
                 const runModeDesc = isFinalApproved
                     ? 'Final Sign-off & Completion'
-                    : (isHumanApproved ? 'Authorizing Patch & Executing Genuine Tests' : 'Initiating Multi-Stage Pipeline (Classification, RCA, Baseline Testing)');
+                    : (isHumanApproved ? 'Authorizing Patch & Executing Genuine Tests' : 'Initiating 9-Stage Pipeline (Intake, Classification, Analysis, Proposal)');
 
-                response.markdown(`### 🛡️ GCAC Orchestrator: \`${vulnId}\`\n\n**Action**: ${runModeDesc}\n\n`);
+                response.markdown(formatRunHeaderMarkdown(vulnId, runModeDesc));
 
                 try {
+                    const syncWebviewAfterRun = () => {
+                        try {
+                            const repoFilter = (hasUserInitiatedScan && activeRepoContext?.canonicalRepositoryPath)
+                                ? { repositoryRoot: activeRepoContext.canonicalRepositoryPath, includeHistorical: false }
+                                : { includeHistorical: false };
+                            const list = getCombinedFindings(currentCsvPath, findingsStore, repoFilter);
+                            broadcast({ type: 'DATA_UPDATED', vulnerabilities: list });
+                            const refreshed = loadVulnerabilityDetails(currentWorkspaceRoot, vulnId);
+                            if (refreshed && engine) {
+                                refreshed.retryEligibility = engine.evaluateRetryEligibility(
+                                    refreshed.runState || vulnId,
+                                    { workspaceTrusted: vscode?.workspace ? vscode.workspace.isTrusted !== false : true }
+                                );
+                            }
+                            broadcast({ type: 'DETAILS_LOADED', details: refreshed });
+                        } catch { }
+                    };
+
                     const result = await engine.executePipeline(vulnId, {
                         isHumanApproved,
                         isFinalApproved,
+                        origin: 'COPILOT_CHAT_PARTICIPANT',
                         authorizedRoots: authRoots,
                         workspaceTrusted: vscode.workspace ? vscode.workspace.isTrusted !== false : true,
                         onProgress: (evt) => {
-                            if (evt.type === 'STAGE_START') {
-                                response.markdown(`- ⏳ **Stage ${evt.stageNumber} Active**: \`${evt.stageId}\`\n`);
-                            } else if (evt.type === 'STAGE_COMPLETE') {
-                                response.markdown(`- ✅ **Stage ${evt.stageNumber} Complete**: ${evt.summary}\n`);
+                            broadcast({ type: 'REMEDIATION_PROGRESS', event: evt });
+                            const stageMd = formatStageEventMarkdown(evt);
+                            if (stageMd) {
+                                response.markdown(stageMd);
                             }
                         }
                     });
+                    syncWebviewAfterRun();
 
-                    if (result.isAwaitingApproval) {
-                        const diffHashLine = result.proposedDiffSha256 ? `- **Proposed Diff SHA-256**: \`${result.proposedDiffSha256}\`\n` : '';
-                        response.markdown(`\n\n---\n### 🛡️ Human Approval Gate (Stage 4)\n` +
-                            `Baseline testing executed: **${result.baselineValidation ? result.baselineValidation.status : 'NOT EXECUTED'}**\n` +
-                            diffHashLine +
-                            `- **Identity Status**: \`AUTHENTICATION_NOT_VERIFIED\` (Local PoC mode)\n` +
-                            `- **Copilot Control Boundary**: ${COPILOT_APPROVAL_LIMITATION_DISCLOSURE}\n\n` +
-                            `Proposed secure patch generated for \`${vulnId}\`:\n\n` +
-                            `\`\`\`diff\n${result.patchDiff}\n\`\`\`\n\n` +
-                            `**To authorize via Copilot Chat**, enter:\n` +
-                            `> \`@vulnerability-orchestrator /approve ${vulnId}\`\n\n` +
-                            `*(Or click Approve in the GCAC Remediation Hub)*\n`);
-                    } else if (result.isAwaitingFinalApproval) {
-                        response.markdown(`\n\n---\n### 🛡️ Final Human Approval Gate (Stage 8)\n` +
-                            `- Post-Fix Test Result: **${result.validation ? (result.validation.outcome || result.validation.status) : 'NOT EXECUTED'}**\n` +
-                            `- Independent Auditor Rating: **${result.securityReview ? result.securityReview.rating : 'NOT_VERIFIED'}** (Confidence Score: **${result.securityReview ? result.securityReview.score : 0}/100**)\n\n` +
-                            `**To sign off and finalize via Copilot Chat**, enter:\n` +
-                            `> \`@vulnerability-orchestrator /final-approve ${vulnId}\`\n\n` +
-                            `*(Or click Sign-off in the GCAC Remediation Hub)*\n`);
-                    } else if (result.isCompleted) {
-                        response.markdown(`\n\n---\n### ✅ Remediation Completed\n` +
-                            `- **Vulnerability ID**: \`${vulnId}\`\n` +
-                            `- **Shared Markdown Report**: \`${result.reportPath}\`\n` +
-                            `- **CSV Status**: Updated to \`${result.status}\` (Selected Row Only)\n` +
-                            `- **Next Step**: Ready for Non-Agentic Regression Testing & CI/CD Deployment.\n`);
+                    if (result.isAwaitingApproval || (result.isAwaitingFinalApproval && !result.finalGateBlocked)) {
+                        response.markdown(formatGateMarkdown(vulnId, result));
+                    } else {
+                        response.markdown(formatTerminalConclusionMarkdown(vulnId, result));
                     }
                 } catch (err) {
-                    response.markdown(`\n\n❌ **Pipeline Execution Stopped**: ${err.message}\n`);
+                    try {
+                        const refreshed = loadVulnerabilityDetails(currentWorkspaceRoot, vulnId);
+                        broadcast({ type: 'DETAILS_LOADED', details: refreshed });
+                    } catch { }
+                    response.markdown(formatErrorMarkdown('Pipeline Execution Stopped', err.message));
                 }
             });
             context.subscriptions.push(participant);
@@ -764,6 +772,16 @@ function getPreloadedDetails(workspaceRoot, vulnerabilities) {
             try {
                 const det = loadVulnerabilityDetails(workspaceRoot, id);
                 if (det && det.hasEvidence) {
+                    if (engine) {
+                        const liveState = engine.loadRunState(id);
+                        det.retryEligibility = engine.evaluateRetryEligibility(
+                            liveState || id,
+                            {
+                                finding: v,
+                                workspaceTrusted: vscode?.workspace ? vscode.workspace.isTrusted !== false : true
+                            }
+                        );
+                    }
                     detailsList.push(det);
                 }
             } catch (e) { }
@@ -1197,7 +1215,7 @@ async function handleWebviewMessage(message, webview) {
                         sourceCode: '',
                         sourceLocation: `${finding.Location_Path}:${finding.Line_Number || 1}`,
                         validationSummary: finding.Test_Status || 'Pending',
-                        confidenceScore: parseInt(finding.Final_Confidence_Score, 10) || 0,
+                        evidenceChecklist: buildEvidenceChecklist({ finding }),
                         timings: null
                     };
                 }
@@ -1219,6 +1237,26 @@ async function handleWebviewMessage(message, webview) {
                     details.diagnostics = liveState.diagnostics || details.diagnostics || details.validation || null;
                     details.baselineValidation = details.baselineValidation || liveState.baselineValidation || null;
                     details.reScanVerification = details.reScanVerification || liveState.reScanVerification || null;
+                    if (liveState.workflowLifecycle) details.workflowLifecycle = liveState.workflowLifecycle;
+                    if (liveState.securityValidationOutcome) details.securityValidationOutcome = liveState.securityValidationOutcome;
+                    if (liveState.approvalDecision) details.approvalDecision = liveState.approvalDecision;
+                    if (liveState.formalClosure) details.formalClosure = liveState.formalClosure;
+                    if (liveState.findingState) details.findingState = liveState.findingState;
+                    if (liveState.terminalBanner) details.terminalBanner = liveState.terminalBanner;
+                    if (liveState.handoff) details.handoff = liveState.handoff;
+                    if (liveState.evidenceChecklist) details.evidenceChecklist = liveState.evidenceChecklist;
+                }
+                if (details && !details.evidenceChecklist) {
+                    details.evidenceChecklist = buildEvidenceChecklist({
+                        finding: finding || details.finding || { Vulnerability_ID: message.vulnerabilityId },
+                        classification: details.classification,
+                        validation: details.validation || details.diagnostics,
+                        reScanVerification: details.reScanVerification,
+                        patchDiff: details.patchDiff,
+                        approvalRecord: details.approvalRecord,
+                        securityReview: details.securityReview,
+                        integrityVerification: details.integrityVerification
+                    });
                 }
                 details.retryEligibility = engine.evaluateRetryEligibility(
                     liveState || message.vulnerabilityId,
@@ -1229,6 +1267,25 @@ async function handleWebviewMessage(message, webview) {
                 );
             }
             webview.postMessage({ type: 'DETAILS_LOADED', details });
+            break;
+        }
+
+        case 'syncRunState': {
+            if (!message.vulnerabilityId) return;
+            const runMgr = new RunStateManager(currentWorkspaceRoot);
+            const existing = runMgr.loadState(message.vulnerabilityId);
+            if (existing && existing.handoff && existing.workflowLifecycle === 'HANDED_OFF_TO_COPILOT') {
+                existing.handoff.lastSyncedAt = new Date().toISOString();
+                runMgr.saveState(message.vulnerabilityId, existing);
+            }
+            await handleWebviewMessage({ command: 'loadDetails', vulnerabilityId: message.vulnerabilityId }, webview);
+            webview.postMessage({
+                type: 'ACTION_FEEDBACK',
+                text: existing
+                    ? `Synchronized state for ${message.vulnerabilityId}: ${existing.terminalBanner || existing.findingState || existing.status}`
+                    : `No persisted run state yet for ${message.vulnerabilityId}.`,
+                status: 'info'
+            });
             break;
         }
 
@@ -1302,6 +1359,8 @@ async function handleWebviewMessage(message, webview) {
                 }
                 const scanResult = await scanController.startScan({
                     scannerIds: message.scannerIds,
+                    mode: message.scanMode || message.mode || 'comprehensive',
+                    bypassCache: Boolean(message.bypassCache),
                     targetRepo: targetPath,
                     persistRegistration: true,
                     onProgress: (evt) => {
@@ -1310,7 +1369,7 @@ async function handleWebviewMessage(message, webview) {
                 });
 
                 hasUserInitiatedScan = true;
-                activeRepoContext = scanResult.repositoryContext || inspectRepositoryTarget(targetPath, currentWorkspaceRoot, registry);
+                activeRepoContext = scanResult.repositoryContext || scanResult.repoContext || inspectRepositoryTarget(targetPath, currentWorkspaceRoot, registry);
                 currentScanTarget = assertPathWithinWorkspace(targetPath, currentWorkspaceRoot)
                     ? (path.relative(currentWorkspaceRoot, targetPath).replace(/\\/g, '/') || '.')
                     : canonicalizePath(targetPath);
@@ -1322,6 +1381,14 @@ async function handleWebviewMessage(message, webview) {
                     type: 'SCAN_COMPLETED',
                     result: scanResult,
                     scanId: scanResult.scanId,
+                    scanMode: scanResult.scanMode,
+                    coverageDisclosure: scanResult.coverageDisclosure || '',
+                    omittedScanners: scanResult.omittedScanners || [],
+                    cancelled: Boolean(scanResult.cancelled),
+                    timedOut: Boolean(scanResult.timedOut),
+                    fromCache: Boolean(scanResult.fromCache),
+                    cacheHits: scanResult.cacheHits || 0,
+                    cacheMisses: scanResult.cacheMisses || 0,
                     findingsCount: scanResult.findingsSummary.total,
                     targetPath: targetPath,
                     repoContext: activeRepoContext,
@@ -1334,7 +1401,13 @@ async function handleWebviewMessage(message, webview) {
                 });
                 broadcast({ type: 'DATA_UPDATED', vulnerabilities: combined });
 
-                if (scanResult.status === 'No Scannable Inputs' || scanResult.status === 'Unsupported Repository') {
+                if (scanResult.cancelled) {
+                    webview.postMessage({
+                        type: 'ACTION_FEEDBACK',
+                        text: `Scan cancelled (${scanResult.scanId}). Coverage incomplete; child processes terminated.`,
+                        status: 'warning'
+                    });
+                } else if (scanResult.status === 'No Scannable Inputs' || scanResult.status === 'Unsupported Repository') {
                     webview.postMessage({
                         type: 'ACTION_FEEDBACK',
                         text: `Scan skipped (${scanResult.status}): ${scanResult.unsupportedReason || 'No supported source/manifest inputs found in target repository.'}`,
@@ -1343,14 +1416,15 @@ async function handleWebviewMessage(message, webview) {
                 } else if (scanResult.errors && scanResult.errors.length > 0) {
                     webview.postMessage({
                         type: 'ACTION_FEEDBACK',
-                        text: `Scan finished with ${scanResult.errors.length} scanner failure(s) — coverage incomplete. Findings: ${scanResult.findingsSummary.total}.`,
+                        text: `Scan finished (${scanResult.scanMode || 'comprehensive'}) with ${scanResult.errors.length} scanner issue(s) — coverage incomplete. Findings: ${scanResult.findingsSummary.total}.`,
                         status: 'warning'
                     });
                 } else {
+                    const cacheTag = scanResult.cacheHits > 0 ? ` (${scanResult.cacheHits} cached, hash-verified)` : '';
                     webview.postMessage({
                         type: 'ACTION_FEEDBACK',
-                        text: `Scan finished (${scanResult.repositoryContext?.applicationNumber || 'local'}): ${scanResult.findingsSummary.total} finding(s) (${scanResult.findingsSummary.critical} Critical, ${scanResult.findingsSummary.high} High).`,
-                        status: 'success'
+                        text: `${scanResult.scanMode === 'quick' ? 'Quick' : 'Comprehensive'} scan finished${cacheTag}: ${scanResult.findingsSummary.total} finding(s) (${scanResult.findingsSummary.critical} Critical, ${scanResult.findingsSummary.high} High).`,
+                        status: scanResult.scanMode === 'quick' ? 'info' : 'success'
                     });
                 }
             } catch (err) {
@@ -1477,87 +1551,6 @@ async function handleWebviewMessage(message, webview) {
             break;
         }
 
-        case 'runRemediation': {
-            if (vscode.workspace && !vscode.workspace.isTrusted) {
-                vscode.window.showErrorMessage('GCAC: Remediation actions are disabled in Restricted Mode. Please trust this workspace to proceed.');
-                webview.postMessage({
-                    type: 'ACTION_FEEDBACK',
-                    text: 'Action blocked: Workspace is untrusted (Restricted Mode).',
-                    status: 'error'
-                });
-                return;
-            }
-
-            const sendEnrichedDetails = (vulnId) => {
-                const details = loadVulnerabilityDetails(currentWorkspaceRoot, vulnId);
-                const liveState = engine?.loadRunState(vulnId);
-                const combinedAll = getCombinedFindings(currentCsvPath, findingsStore, { includeHistorical: true });
-                const matchedFinding = combinedAll.find(f => f.Vulnerability_ID === vulnId) || null;
-                if (details && liveState) {
-                    details.runState = liveState;
-                    details.runId = liveState.runId || details.runId || null;
-                    details.attemptId = liveState.attemptId || details.attemptId || null;
-                    details.attemptNumber = Number(liveState.attemptNumber || details.attemptNumber || 1);
-                    details.retryCount = Number(liveState.retryCount ?? details.retryCount ?? 0);
-                    details.attemptHistory = Array.isArray(liveState.attemptHistory) ? liveState.attemptHistory : (details.attemptHistory || []);
-                    details.failedStage = liveState.failedStage ?? details.failedStage ?? null;
-                    details.failedStageId = liveState.failedStageId || details.failedStageId || null;
-                    details.failureCategory = liveState.failureCategory || details.failureCategory || null;
-                    details.failureReason = liveState.failureReason || details.failureReason || null;
-                    details.diagnostics = liveState.diagnostics || details.diagnostics || details.validation || null;
-                    details.retryEligibility = engine.evaluateRetryEligibility(liveState, {
-                        finding: matchedFinding,
-                        workspaceTrusted: vscode?.workspace ? vscode.workspace.isTrusted !== false : true
-                    });
-                }
-                webview.postMessage({ type: 'DETAILS_LOADED', details });
-            };
-
-            try {
-                syncAuthorizedRoots();
-                await engine.executePipeline(message.vulnerabilityId, {
-                    isHumanApproved: false,
-                    isFinalApproved: false,
-                    authorizedRoots: buildAuthorizedRoots(),
-                    workspaceTrusted: vscode?.workspace ? vscode.workspace.isTrusted !== false : true,
-                    onProgress: (event) => {
-                        webview.postMessage({ type: 'REMEDIATION_PROGRESS', event });
-                    }
-                });
-                const repoFilter = (hasUserInitiatedScan && activeRepoContext?.canonicalRepositoryPath)
-                    ? { repositoryRoot: activeRepoContext.canonicalRepositoryPath, includeHistorical: false }
-                    : { includeHistorical: false };
-                const list = getCombinedFindings(currentCsvPath, findingsStore, repoFilter);
-                broadcast({ type: 'DATA_UPDATED', vulnerabilities: list });
-                sendEnrichedDetails(message.vulnerabilityId);
-            } catch (err) {
-                if (String(err.message || '').includes('SEC-02 Blocked')) {
-                    const combinedAll = getCombinedFindings(currentCsvPath, findingsStore, { includeHistorical: true });
-                    const matched = combinedAll.find(f => f.Vulnerability_ID === message.vulnerabilityId);
-                    webview.postMessage({
-                        type: 'REPOSITORY_MAPPING_REQUIRED',
-                        vulnerabilityId: message.vulnerabilityId,
-                        reasonCode: 'MISSING_OR_AMBIGUOUS_METADATA',
-                        reason: err.message,
-                        finding: matched || null
-                    });
-                }
-                vscode.window.showErrorMessage(`Remediation error: ${err.message}`);
-                webview.postMessage({
-                    type: 'REMEDIATION_PROGRESS',
-                    event: { type: 'LOG', tag: 'ERROR', message: err.message }
-                });
-                webview.postMessage({
-                    type: 'ACTION_FEEDBACK',
-                    text: `Remediation error: ${err.message}`,
-                    status: 'error'
-                });
-                sendEnrichedDetails(message.vulnerabilityId);
-                webview.postMessage({ type: 'REMEDIATION_ERROR', error: err.message });
-            }
-            break;
-        }
-
         case 'retryStage': {
             if (vscode.workspace && !vscode.workspace.isTrusted) {
                 vscode.window.showErrorMessage('GCAC: Remediation actions are disabled in Restricted Mode.');
@@ -1565,6 +1558,12 @@ async function handleWebviewMessage(message, webview) {
                     type: 'ACTION_FEEDBACK',
                     text: 'Retry blocked: Workspace is untrusted (Restricted Mode).',
                     status: 'error'
+                });
+                webview.postMessage({
+                    type: 'RETRY_UNAVAILABLE',
+                    vulnerabilityId: message.vulnerabilityId,
+                    reasonCode: 'UNTRUSTED_WORKSPACE',
+                    reason: 'Workspace is untrusted (Restricted Mode).'
                 });
                 return;
             }
@@ -1578,20 +1577,23 @@ async function handleWebviewMessage(message, webview) {
                     targetStage: Number.isInteger(message.fromStage) ? message.fromStage : undefined,
                     finding,
                     workspaceTrusted,
-                    environmentRecovered: message.environmentRecovered === true
+                    environmentRecovered: message.environmentRecovered === true ? true : undefined
                 });
 
                 if (!eligibility.retryEligible) {
                     webview.postMessage({
                         type: 'ACTION_FEEDBACK',
-                        text: `Retry unavailable: ${eligibility.reason}`,
+                        text: `Retry unavailable (${eligibility.reasonCode}): ${eligibility.reason}`,
                         status: 'warning'
                     });
-                    const details = loadVulnerabilityDetails(currentWorkspaceRoot, message.vulnerabilityId);
-                    if (details) {
-                        details.retryEligibility = eligibility;
-                        webview.postMessage({ type: 'DETAILS_LOADED', details });
-                    }
+                    webview.postMessage({
+                        type: 'RETRY_UNAVAILABLE',
+                        vulnerabilityId: message.vulnerabilityId,
+                        eligibility,
+                        reasonCode: eligibility.reasonCode,
+                        reason: eligibility.reason
+                    });
+                    await handleWebviewMessage({ command: 'loadDetails', vulnerabilityId: message.vulnerabilityId }, webview);
                     return;
                 }
 
@@ -1599,9 +1601,9 @@ async function handleWebviewMessage(message, webview) {
                     expectedRunId: message.runId || eligibility.runId || undefined,
                     workspaceTrusted,
                     authorizedRoots: buildAuthorizedRoots(),
-                    environmentRecovered: message.environmentRecovered === true,
+                    environmentRecovered: message.environmentRecovered === true ? true : undefined,
                     onProgress: (event) => {
-                        webview.postMessage({ type: 'REMEDIATION_PROGRESS', event });
+                        broadcast({ type: 'REMEDIATION_PROGRESS', event });
                     }
                 });
                 const repoFilter = (hasUserInitiatedScan && activeRepoContext?.canonicalRepositoryPath)
@@ -1618,6 +1620,7 @@ async function handleWebviewMessage(message, webview) {
                     status: 'error'
                 });
                 await handleWebviewMessage({ command: 'loadDetails', vulnerabilityId: message.vulnerabilityId }, webview);
+                webview.postMessage({ type: 'RETRY_UNAVAILABLE', vulnerabilityId: message.vulnerabilityId, reason: err.message });
                 webview.postMessage({ type: 'REMEDIATION_ERROR', error: err.message });
             }
             break;
@@ -1631,6 +1634,7 @@ async function handleWebviewMessage(message, webview) {
                     text: 'Revise Fix blocked: Workspace is untrusted (Restricted Mode).',
                     status: 'error'
                 });
+                webview.postMessage({ type: 'REMEDIATION_ERROR', error: 'Workspace is untrusted (Restricted Mode).' });
                 return;
             }
             try {
@@ -1641,7 +1645,7 @@ async function handleWebviewMessage(message, webview) {
                     workspaceTrusted: vscode?.workspace ? vscode.workspace.isTrusted !== false : true,
                     authorizedRoots: buildAuthorizedRoots(),
                     onProgress: (event) => {
-                        webview.postMessage({ type: 'REMEDIATION_PROGRESS', event });
+                        broadcast({ type: 'REMEDIATION_PROGRESS', event });
                     }
                 });
                 const repoFilter = (hasUserInitiatedScan && activeRepoContext?.canonicalRepositoryPath)
@@ -1975,17 +1979,36 @@ async function handleWebviewMessage(message, webview) {
                 console.warn('Could not execute workbench.action.chat.open:', e.message);
             }
 
+            let handoffRes = null;
+            try {
+                const runMgr = new RunStateManager(currentWorkspaceRoot);
+                handoffRes = runMgr.recordCopilotHandoff(finding.Vulnerability_ID, {
+                    repositoryId: finding.canonicalRepositoryId || promptRes.context?.canonicalRepositoryId || '',
+                    queryIssued: true
+                });
+            } catch (e) {
+                console.warn('Could not persist Copilot handoff state:', e.message);
+            }
+
+            if (handoffRes?.state) {
+                await handleWebviewMessage({ command: 'loadDetails', vulnerabilityId: finding.Vulnerability_ID }, webview);
+            }
+
             webview.postMessage({
                 type: 'COPILOT_LAUNCHED',
                 prompt: query,
                 vulnerabilityId: finding.Vulnerability_ID,
                 title: finding.Title,
                 findingContext: promptRes.context,
+                handoffState: handoffRes?.state?.handoff || { state: 'HANDED_OFF_TO_COPILOT', displayState: 'AWAITING_VERIFIED_RESULT' },
+                runId: handoffRes?.state?.runId || null,
+                workflowLifecycle: handoffRes?.state?.workflowLifecycle || 'HANDED_OFF_TO_COPILOT',
+                findingState: handoffRes?.state?.findingState || 'AWAITING_VERIFIED_RESULT',
                 manualSubmissionRequired: true
             });
             webview.postMessage({
                 type: 'ACTION_FEEDBACK',
-                text: `Copilot Chat opened with validated scan context. Press Enter in Copilot Chat to begin.`,
+                text: `Copilot Chat opened (${finding.Vulnerability_ID}): State set to Awaiting Verified Result until @vulnerability-orchestrator executes.`,
                 status: 'info'
             });
             break;

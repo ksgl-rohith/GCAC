@@ -125,7 +125,7 @@
                         <div class="header-titles">
                             <div class="header-primary-title">
                                 <h1 id="pageTitle">Vulnerability Dashboard</h1>
-                                <span class="env-pill">7-STAGE</span>
+                                <span class="env-pill">9-STAGE</span>
                             </div>
                             <p class="header-subtitle" id="pageSubtitle">Real-time overview of remediation activity and
                                 security posture.</p>
@@ -178,15 +178,6 @@
                                 </button>
                             </div>
                         </div>
-
-                        <!-- Primary Action -->
-                        <button class="btn btn-primary btn-run-remediation" id="btnHeaderQuickRun"
-                            title="Run remediation on selected finding">
-                            <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
-                                <path d="M8 5v14l11-7z" />
-                            </svg>
-                            <span class="btn-text">Run Remediation</span>
-                        </button>
                     </div>
                 </div>
 
@@ -684,10 +675,6 @@
                                             </svg>
                                             <span>Run with Copilot</span>
                                         </button>
-                                        <button class="btn btn-secondary btn-sm" id="btnRunRemediation"
-                                            title="Execute local multi-agent pipeline">
-                                            <span id="btnRunRemediationText">Execute Engine</span>
-                                        </button>
                                         <button class="btn btn-secondary btn-sm" id="btnOpenLocation"
                                             title="Jump to source file in VS Code">
                                             <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
@@ -710,9 +697,14 @@
                                 <!-- Agent Execution Timeline -->
                                 <div class="pipeline-section">
                                     <div class="pipeline-header">
-                                        <div class="pipeline-title">Agent Execution Timeline</div>
-                                        <span class="badge" id="pipelineOverallStatus">Ready</span>
+                                        <div class="pipeline-title">Canonical 9-Stage Execution Timeline</div>
+                                        <div class="u-flex-row u-gap-8 u-items-center">
+                                            <button class="btn btn-secondary btn-sm" id="btnSyncRunState"
+                                                title="Refresh and synchronize authoritative run state from extension host">↻ Sync Status</button>
+                                            <span class="badge" id="pipelineOverallStatus">Ready</span>
+                                        </div>
                                     </div>
+                                    <div class="scan-coverage-banner u-hidden u-mb-8" id="copilotHandoffBanner"></div>
                                     <ul class="stepper-list" id="pipelineStepper">
                                         <!-- Dynamically rendered timeline -->
                                     </ul>
@@ -743,14 +735,14 @@
                                     </div>
                                 </div>
 
-                                <!-- Stage 6 Final Sign-off Gate Panel -->
+                                <!-- Stage 8 Final Sign-off Gate Panel -->
                                 <div class="gate-decision-card final-gate u-hidden" id="finalGateCard">
                                     <div class="gate-card-header">
                                         <div class="gate-card-title">
                                             <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
                                                 <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z" />
                                             </svg>
-                                            <span>Final Sign-off Gate (Stage 6)</span>
+                                            <span>Final Sign-off Gate (Stage 8)</span>
                                         </div>
                                         <span class="badge badge-status-remediated">Validation Complete</span>
                                     </div>
@@ -783,8 +775,10 @@
                                     </div>
                                     <div class="retry-reason-note u-hidden" id="retryUnavailableReason"></div>
                                     <div class="failure-actions">
-                                        <button class="btn btn-primary btn-sm" id="btnRetryStage">Retry Stage</button>
-                                        <button class="btn btn-warning btn-sm u-hidden" id="btnReviseFix">Review Failure / Revise Fix</button>
+                                        <button class="btn btn-primary btn-sm" id="btnRetryStage"
+                                            title="Re-execute a failed or interrupted stage caused by transient errors without changing code">Retry Stage (Transient)</button>
+                                        <button class="btn btn-warning btn-sm u-hidden" id="btnReviseFix"
+                                            title="Analyze failure diagnostics, generate a revised code fix, and stop at Stage 4 for fresh human approval">Review Failure / Revise Fix</button>
                                         <button class="btn btn-secondary btn-sm" id="btnViewTestEvidence">Test Diagnostics</button>
                                         <button class="btn btn-secondary btn-sm" id="btnViewFailureLogs">View Agent Log</button>
                                         <button class="btn btn-secondary btn-sm" id="btnReviewDiffFromFailure">Review
@@ -872,8 +866,8 @@
                         <div class="active-runs-header">
                             <div>
                                 <h2 id="activeRunVulnTitle">Active Remediation Pipeline</h2>
-                                <p class="view-subtitle" id="activeRunVulnSubtitle">Real-time status of 7-stage
-                                    autonomous execution &amp; verification</p>
+                                <p class="view-subtitle" id="activeRunVulnSubtitle">Real-time canonical status of 9-stage
+                                    governed execution &amp; verification</p>
                             </div>
                             <div class="active-run-controls">
                                 <span class="badge" id="activeRunStatusPill">Idle</span>
@@ -883,7 +877,7 @@
                         <div class="active-run-body-grid">
                             <!-- Left: Execution Timeline -->
                             <div class="active-stepper-card">
-                                <div class="card-heading">7-Stage Pipeline Execution</div>
+                                <div class="card-heading">9-Stage Canonical Pipeline Execution</div>
                                 <ul class="stepper-list" id="activeRunsStepper">
                                     <!-- Dynamic stepper -->
                                 </ul>
@@ -1048,13 +1042,14 @@
                             <div class="scan-progress-header">
                                 <div class="scan-progress-title">
                                     <span class="live-pulse-dot"></span>
-                                    <span id="scanProgressText">Scanning repository...</span>
+                                    <span id="scanProgressText">Preparing local security scan...</span>
                                 </div>
                                 <div class="scan-progress-timer" id="scanProgressTimer">0s</div>
                             </div>
                             <div class="scan-progress-bar-track">
                                 <div class="scan-progress-bar-fill scan-progress-init" id="scanProgressBarFill"></div>
                             </div>
+                            <div class="scan-progress-meta" id="scanProgressMeta"></div>
                         </div>
 
                         <!-- Scan Coverage / Empty / Unsupported Warning Banner -->
@@ -1126,7 +1121,23 @@
 
                         <!-- Scan Configuration & Scope -->
                         <div class="scan-scope-card">
-                            <div class="card-heading">Scan Execution Scope &amp; Selectors</div>
+                            <div class="card-heading">Scan Mode, Execution Scope &amp; Selectors</div>
+                            <div class="scan-mode-row">
+                                <div class="u-flex-row u-gap-10 u-items-center">
+                                    <label for="selectScanMode" class="u-font-12 u-fw-600 u-text-secondary">Scan Mode:</label>
+                                    <select class="dash-select" id="selectScanMode">
+                                        <option value="comprehensive" selected>Comprehensive Scan (All Selected Analyzers)</option>
+                                        <option value="quick">Quick Scan (Secrets &amp; Config Only — Limited Coverage)</option>
+                                    </select>
+                                </div>
+                                <label class="scan-checkbox-label">
+                                    <input type="checkbox" id="chkBypassScanCache">
+                                    <span>Force Fresh Scan (Bypass Verified Input Cache)</span>
+                                </label>
+                            </div>
+                            <div class="scan-mode-disclosure" id="scanModeDisclosure">
+                                Comprehensive Scan runs all selected SAST, SCA, secrets/configuration, and optional CodeQL analyzers (CodeQL runs only when installed).
+                            </div>
                             <div class="scan-options-row">
                                 <label class="scan-checkbox-label">
                                     <input type="checkbox" id="chkScanSecrets" checked>
@@ -1315,20 +1326,19 @@
                                 </div>
                             </div>
 
-                            <!-- 7-Stage Agent Policy Card -->
+                            <!-- 9-Stage Agent Policy Card -->
                             <div class="settings-card">
-                                <div class="card-heading">7-Stage Fail-Closed Governance Workflow</div>
+                                <div class="card-heading">9-Stage Fail-Closed Governance Workflow</div>
                                 <div class="policy-steps-summary">
-                                    <div><strong>Stage 1:</strong> Classification &amp; Severity Governance (Original severity remains immutable)</div>
-                                    <div><strong>Stage 2:</strong> Code Analysis (Scoped single-finding RCA)</div>
-                                    <div><strong>Stage 3:</strong> Remediation Synthesis (Minimal verified patch proposal)
-                                    </div>
-                                    <div><strong>Stage 4:</strong> Human Approval Gate (Mandatory stop before test
-                                        execution &amp; diff binding)</div>
-                                    <div><strong>Stage 5:</strong> Real Build/Test &amp; Security Review (Zero-test / suppression fails closed)</div>
-                                    <div><strong>Stage 6:</strong> Originating Scanner Re-Scan &amp; Final Human Sign-off Gate</div>
-                                    <div><strong>Stage 7:</strong> Human-Controlled Git Review &amp; CI/CD Handoff (No autonomous push/PR)
-                                    </div>
+                                    <div><strong>Stage 1:</strong> Intake &amp; Repository Context Validation (Single-finding &amp; canonical path binding)</div>
+                                    <div><strong>Stage 2:</strong> Classification &amp; Severity Governance (Original scanner severity remains immutable)</div>
+                                    <div><strong>Stage 3:</strong> Source Analysis, RCA &amp; Baseline Testing (Isolated worktree &amp; evidence capture)</div>
+                                    <div><strong>Stage 4:</strong> Human Approval Gate (Mandatory stop before mutation &amp; diff SHA-256 binding)</div>
+                                    <div><strong>Stage 5:</strong> Code Remediation (Isolated worktree file-scoped patch application)</div>
+                                    <div><strong>Stage 6:</strong> Bench Test &amp; Originating Scanner Re-Scan (Zero-test / suppression / build errors fail closed)</div>
+                                    <div><strong>Stage 7:</strong> Security Review &amp; Deterministic Evidence Checklist (Transparent check verification)</div>
+                                    <div><strong>Stage 8:</strong> Final Human Sign-Off Gate (Automatically BLOCKED if validation failed)</div>
+                                    <div><strong>Stage 9:</strong> Workflow Closure &amp; Tamper-Detectable Evidence Ledger (Human-controlled Git review)</div>
                                 </div>
                             </div>
                         </div>

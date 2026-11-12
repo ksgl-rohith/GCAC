@@ -165,20 +165,11 @@ const server = http.createServer(async (req, res) => {
                                     }
                                 });
                         } else if (msg.command === 'runRemediation') {
-                            // Connect to live SSE stream for real-time tracking
-                            const es = new EventSource('/api/remediate-stream?id=' + encodeURIComponent(msg.vulnerabilityId));
-                            es.onmessage = function(e) {
-                                try {
-                                    const event = JSON.parse(e.data);
-                                    window.postMessage({ type: 'REMEDIATION_PROGRESS', event: event }, '*');
-                                    if (event.type === 'GATE_REQUIRED' || event.type === 'FINAL_GATE_REQUIRED' || event.type === 'WORKFLOW_COMPLETE') {
-                                        es.close();
-                                    }
-                                } catch (err) {}
-                            };
-                            es.onerror = function() {
-                                es.close();
-                            };
+                            window.postMessage({
+                                type: 'ACTION_FEEDBACK',
+                                text: 'Simulated local execution has been removed. Use Run with Copilot inside VS Code.',
+                                status: 'warning'
+                            }, '*');
                         } else if (msg.command === 'approveRemediation' || msg.command === 'rejectRemediation' || msg.command === 'approveFinalGate' || msg.command === 'rejectFinalGate') {
                             const endpointMap = {
                                 approveRemediation: '/api/approve',
@@ -239,7 +230,19 @@ const server = http.createServer(async (req, res) => {
                                     }, '*');
                                     window.postMessage({ type: 'ACTION_FEEDBACK', text: 'Copilot command prepared: ' + res.query, status: 'info' }, '*');
                                 });
-                        } else if (msg.command === 'retryStage' || msg.command === 'reviseFix' || msg.command === 'mapFindingRepository') {
+                        } else if (msg.command === 'retryStage' || msg.command === 'reviseFix') {
+                            window.postMessage({
+                                type: 'RETRY_UNAVAILABLE',
+                                vulnerabilityId: msg.vulnerabilityId,
+                                reasonCode: 'PREVIEW_MODE_READ_ONLY',
+                                reason: 'Preview dashboard runs in read-only mode. Open GCAC inside VS Code to execute Retry Stage or Review Failure / Revise Fix.'
+                            }, '*');
+                            window.postMessage({
+                                type: 'ACTION_FEEDBACK',
+                                text: 'Read-only preview mode: stage execution actions require the VS Code Extension Host.',
+                                status: 'warning'
+                            }, '*');
+                        } else if (msg.command === 'mapFindingRepository') {
                             fetch('/api/approve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: msg.vulnerabilityId }) })
                                 .then(r => r.json()).then(res => {
                                     window.postMessage({ type: 'ACTION_FEEDBACK', text: res.error, status: 'error' }, '*');
@@ -593,8 +596,12 @@ const server = http.createServer(async (req, res) => {
         return;
     }
 
-    // Server-Sent Events endpoint for read-only local analysis preview
+    // Server-Sent Events endpoint is disabled in production preview mode (dev-only explicit opt-in)
     if (url.pathname === '/api/remediate-stream') {
+        if (process.env.GCAC_ALLOW_DEV_PREVIEW_SIMULATION !== '1') {
+            sendBlockedPreviewAction(res, 'Local simulated remediation stream is disabled. Use Run with Copilot in VS Code.');
+            return;
+        }
         const id = url.searchParams.get('id');
         const isApproved = url.searchParams.get('approved') === 'true';
         const isFinalApproved = url.searchParams.get('finalApproved') === 'true';
